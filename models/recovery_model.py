@@ -1,0 +1,341 @@
+import math
+from typing import List
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import GATConv
+from torch_geometric.nn.pool import global_mean_pool
+
+from base_model import BaseModel
+
+
+class RoadGNN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, dropout, num_heads=8):
+        super(RoadGNN, self).__init__()
+        assert hidden_dim % num_heads == 0
+        self.gnn_layer = nn.ModuleList(
+            [
+                GATConv(in_channels=input_dim if i == 0 else hidden_dim,
+                        out_channels=hidden_dim // num_heads,
+                        num_heads=num_heads,
+                        dropout=dropout,
+                        add_self_loops=True)
+                for i in range(num_layers)
+            ]
+        )
+        self.dropout_layer = nn.Dropout(dropout)
+
+    def forward(self, edge_index, node_feat, readout=True, batch=None, weight=None):
+        """
+
+        Args:
+            edge_index:
+            node_feat: torch.Tensor [num_node, feat_dim]
+            readout:
+            batch:
+            weight: torch.Tensor [num_node]
+
+        Returns:
+
+        """
+        node_embed = self.dropout_layer(self.gnn_layer(node_feat, edge_index))
+        if not readout:
+            return node_embed
+        if weight is None:
+            graph_embed = global_mean_pool(node_embed, batch)
+        else:
+            weighted_node_embed = node_embed * weight.unsqueeze(1)
+            graph_embed = global_mean_pool(weighted_node_embed, batch)
+        return graph_embed
+
+
+class PositionEncoding(nn.Module):
+    def __init__(self, hidden_dim, max_len=150):
+        super(PositionEncoding, self).__init__()
+        self.hidden_dim = hidden_dim
+
+        pe = torch.zeros(max_len, hidden_dim)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, hidden_dim, 2).float() * (-math.log(10000.0) / hidden_dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x):
+        x = x * math.sqrt(self.hidden_dim)
+        x = x + self.pe[:, :x.size(1)]
+        return x
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, hidden_dim, num_heads, dropout=0.1):
+        super(MultiHeadAttention, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.dim_per_head = hidden_dim // num_heads
+
+        self.q_layer = nn.Linear(hidden_dim, hidden_dim)
+        self.k_layer = nn.Linear(hidden_dim, hidden_dim)
+        self.v_layer = nn.Linear(hidden_dim, hidden_dim)
+        self.dropout_layer = nn.Dropout(dropout)
+        self.output_layer = nn.Linear(hidden_dim, hidden_dim)
+
+    def attention(self, q, k, v, mask=None, dropout=None):
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.dim_per_head)
+        if mask is not None:
+            mask = mask.unsqueeze(1)
+            scores = scores.masked_fill(mask == 0, -1e9)
+        scores = F.softmax(scores, dim=-1)
+        if dropout is not None:
+            scores = self.dropout_layer(scores)
+        output = torch.matmul(scores, v)
+        return output
+
+    def forward(self, q, k, v, mask=None):
+        q = self.q_layer(q).view(q.size(0), -1, self.num_heads, self.dim_per_head)
+        k = self.k_layer(k).view(q.size(0), -1, self.num_heads, self.dim_per_head)
+        v = self.v_layer(v).view(q.size(0), -1, self.num_heads, self.dim_per_head)
+
+        k = k.transpose(1, 2)
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
+        scores = self.attention(q, k, v, mask, self.dropout_layer)
+
+        concat = scores.transpose(1, 2).contiguous().view(q.size(0), -1, self.hidden_dim)
+        output = self.output_layer(concat)
+        return output
+
+
+class FeedForwardNetwork(nn.Module):
+    def __init__(self, input_dim, hidden_dim=512, dropout=0.1):
+        super(FeedForwardNetwork, self).__init__()
+        self.linear1 = nn.Linear(input_dim, hidden_dim)
+        self.dropout_layer = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(hidden_dim, input_dim)
+
+    def forward(self, x):
+        x = F.relu(self.linear1(x))
+        x = self.linear2(self.dropout_layer(x))
+        return x
+
+
+class Norm(nn.Module):
+    def __init__(self, hidden_dim, eps=1e-6):
+        super(Norm, self).__init__()
+        self.eps = eps
+
+        self.alpha = nn.Parameter(torch.ones(hidden_dim))
+        self.bias = nn.Parameter(torch.zeros(hidden_dim))
+
+    def forward(self, x):
+        norm = self.alpha * (x - x.mean(dim=-1, keepdim=True)) / \
+               (x.std(dim=-1, keepdim=True) + self.eps) + self.bias
+        return norm
+
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, hidden_dim, num_heads=8, dropout=0.1):
+        super(TransformerEncoder, self).__init__()
+        self.attn_layer = MultiHeadAttention(hidden_dim, num_heads)
+        self.feed_forward = FeedForwardNetwork(hidden_dim)
+        self.norm_layer = Norm(hidden_dim)
+        self.dropout_layer = nn.Dropout(dropout)
+
+    def forward(self, x, mask, norm=False):
+        x2 = self.norm_layer(x)
+        x = x + self.dropout_layer(self.attn_layer(x2, x2, x2, mask))
+        x2 = self.norm_layer(x)
+        x = x + self.dropout_layer(self.feed_forward(x2))
+        return x if not norm else self.norm_layer(x)
+
+
+class GraphNorm(nn.Module):
+    def __init__(self, input_dim):
+        super(GraphNorm, self).__init__()
+        self.gamma = nn.Parameter(torch.ones(1, input_dim))
+        self.beta = nn.Parameter(torch.zeros(1, input_dim))
+        self.moving_mean = torch.zeros(1, input_dim)
+        self.moving_var = torch.ones(1, input_dim)
+
+    def graph_norm(self, input_embed, batch, eps=1e-5, momentum=0.9, mask2d=None):
+        if not torch.is_grad_enabled():
+            embed_hat = (input_embed - self.moving_mean) / torch.sqrt(self.moving_var + eps)
+        else:
+            mean_embed = global_mean_pool(input_embed, batch)
+            if mask2d is not None:
+                mean_embed = mean_embed.reshape(mask2d.size(0), mask2d.size(1), -1)
+                mask2d = mask2d.unsqueeze(-1)
+                mean_embed = (mean_embed * mask2d).sum(dim=(0, 1)) / mask2d.sum()
+                mean_embed = mean_embed.reshape(1, -1)
+            else:
+                mean_embed = mean_embed.mean(dim=0, keepdim=True)
+            var = ((input_embed - mean_embed) ** 2).mean(dim=0, keepdim=True)
+            embed_hat = (input_embed - mean_embed) / torch.sqrt(var + eps)
+            self.moving_mean = momentum * self.moving_mean + (1.0 - momentum) * mean_embed
+            self.moving_var = momentum * self.moving_var + (1.0 - momentum) * var
+        output = self.gamma * embed_hat + self.beta
+        return output
+
+    def forward(self, node_embed, batch, mask2d=None):
+        output = self.graph_norm(node_embed, batch, mask2d=mask2d)
+        return output
+
+
+class GatedFusion(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(GatedFusion, self).__init__()
+        self.spatio_linear = nn.Linear(input_dim, hidden_dim)
+        self.temporal_linear = nn.Linear(input_dim, hidden_dim)
+
+    def forward(self, spatio_feat, temporal_feat):
+        spatio_feat = F.leaky_relu(self.spatio_linear(spatio_feat))
+        temporal_feat = F.leaky_relu(self.temporal_linear(temporal_feat))
+        z = torch.sigmoid(spatio_feat + temporal_feat)
+        fused_feat = z * spatio_feat + (1. - z) * temporal_feat
+        return fused_feat
+
+
+class GraphRefinementLayer(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_heads=8, dropout=0.1):
+        super(GraphRefinementLayer, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.graph_norm_1 = GraphNorm(input_dim)
+        self.graph_norm_2 = GraphNorm(hidden_dim)
+        self.attn_layer = GatedFusion(input_dim, hidden_dim)
+        self.graph_forward = GATConv(in_channels=hidden_dim,
+                                     out_channels=hidden_dim // num_heads,
+                                     num_heads=num_heads,
+                                     add_self_loops=True)
+        self.dropout_layer = nn.Dropout(dropout)
+
+    def forward(self, seq_embed, edge_index, node_feats, batch, mask2d=None):
+        """
+
+        Args:
+            seq_embed: torch.Tensor (batch_size, src_len, hidden_dim)
+            edge_index:
+            batch: (batch_size, node_size)
+            mask2d:
+
+        Returns:
+
+        """
+        batch_size, seq_len = seq_embed.size(0), seq_embed.size(1)
+        seq_embed = seq_embed.reshape(-1, self.hidden_dim)
+
+        node_feats = self.graph_norm_1(node_feats, batch)
+
+        # todo
+        pass
+
+
+class Encoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, extra_input_dim, extra_output_dim, device):
+        super(Encoder, self).__init__()
+        self.device = device
+        self.num_layers = num_layers
+        self.input_layer = nn.Linear(input_dim, hidden_dim)
+        self.output_layer = nn.Linear(hidden_dim, 1)
+        self.position_encoder = PositionEncoding(hidden_dim)
+        self.transformer = nn.ModuleList(
+            [
+                TransformerEncoder(hidden_dim) for _ in range(num_layers)
+            ]
+        )
+        self.graph_refiner = nn.ModuleList(
+            [
+                GraphRefinementLayer(hidden_dim, hidden_dim) for _ in range(num_layers)
+            ]
+        )
+        self.norm_layer = Norm(hidden_dim)
+        self.extra_linear = nn.Linear(extra_input_dim, extra_output_dim)
+        self.extra_layer = nn.Linear(hidden_dim + extra_output_dim, hidden_dim)
+
+    def forward(self, traj_seq_input, traj_seq_len):
+        seq_len, batch_size = traj_seq_input.size(0), traj_seq_input.size(1)
+        mask3d = torch.zeros(batch_size, seq_len, seq_len).to(self.device)
+        mask2d = torch.zeros(batch_size, seq_len).to(self.device)
+        for bs in range(batch_size):
+            mask3d[bs, :traj_seq_len[bs], :traj_seq_len[bs]] = 1
+            mask2d[bs, :traj_seq_len[bs]] = 1
+        seq_embed = self.input_layer(traj_seq_input).transpose(0, 1)
+        seq_embed = self.position_encoder(seq_embed)
+        for l in range(self.num_layers):
+            seq_embed = self.transformer[l](seq_embed, mask3d)
+            seq_embed = self.graph_refiner[l](seq_embed)  # todo
+        pass
+
+
+class Decoder(nn.Module):
+    def __init__(self, node_size, input_dim):
+        super(Decoder, self).__init__()
+        # todo
+
+    def forward(self):
+        # todo
+        pass
+
+
+class RNTrajRec(BaseModel):
+    def __init__(self, num_rn_node, hidden_dim, num_gnn_layers, num_encoder_layers, extra_input_dim, extra_output_dim, grid_shape: List[int, int], grid_embed_size: int, device, batch_size, dropout=0.1):
+        super(RNTrajRec, self).__init__()
+        self.batch_size = batch_size
+        self.device = device
+        self.num_rn_node = num_rn_node
+        grid_embed_table_shape = grid_shape + [grid_embed_size]
+        self.grid_embed_table = nn.Parameter(torch.rand(grid_embed_table_shape))
+        self.road_node_embed_table = nn.Parameter(torch.rand(num_rn_node, grid_embed_size))
+        self.grid_gru = nn.GRU(grid_embed_size, grid_embed_size)
+
+        self.feat_extractor = RoadGNN(input_dim=grid_embed_size,
+                                      hidden_dim=hidden_dim,
+                                      num_layers=num_gnn_layers,
+                                      dropout=dropout)
+        self.encoder = Encoder(hidden_dim + 3, hidden_dim, num_encoder_layers, extra_input_dim, extra_output_dim, device)
+        self.decoder = None  # todo
+
+    def extract_feat(self, grid_seq, road_grid, road_grid_len, subg_node_idx, subg_edge_index, batch, subg_weight):
+        """
+        todo
+        Args:
+            grid_seq:
+            road_grid: torch.Tensor (num_node in road_net, max_seqlen, 2)
+
+        Returns:
+
+        """
+        num_node, max_seqlen = road_grid.shape[0], road_grid.shape[1]
+        road_grids = road_grid.reshape(-1, 2)
+        grid_input = self.grid_embed_table[road_grids[:, 0], road_grids[:, 1]]
+        grid_input = grid_input.reshape(num_node, max_seqlen, -1).transpose(0, 1)  # (seq_len, num_node, feat_dim)
+        packed_grid_input = nn.utils.rnn.pack_padded_sequence(grid_input, road_grid_len,
+                                                              batch_first=False, enforce_sorted=False)
+        _, gru_output = self.grid_gru(packed_grid_input)
+        grid_embed = gru_output.squeeze(0)
+
+        road_node_embed = torch.index_select(self.road_node_embed_table, dim=0, index=subg_node_idx)
+        grid_node_embed = torch.index_select(grid_embed, dim=0, index=subg_node_idx)
+        road_node_embed = F.leaky_relu(road_node_embed + grid_node_embed)
+
+        road_embed = self.feat_extractor(subg_edge_index, road_node_embed, True, batch, subg_weight)
+        return road_embed
+
+    def encoding(self, road_embed, traj_seq, traj_seq_len, traj_graph_node_idx, batch, traj_weight):
+        """ todo """
+        node_embed = torch.index_select(road_embed, dim=0, index=traj_graph_node_idx)
+        traj_graph_embed = global_mean_pool(node_embed * traj_weight.unsqueeze(1), batch)
+        traj_graph_embed = traj_graph_embed.reshape(self.batch_size, traj_seq.size(0), -1).transpose(0, 1)
+        traj_seq_input = torch.cat((traj_graph_embed, traj_seq), dim=-1)
+        return
+
+    def decoding(self, *args):
+        """ todo """
+        return self.decoder(*args)
+
+    def forward(self, *args):
+        """ todo """
+        self.extract_feat(*args)
+        self.encoding(*args)
+        self.decoding(*args)
+        return
