@@ -17,7 +17,7 @@
   "tandem_fea_flag": true,
   "pro_features_flag": true,
   "online_features_flag": false,
-  "grid_flag": true,
+  "grid_flag": false,
 
   "rid_fea_dim": 11,
   "pro_input_dim": 25,

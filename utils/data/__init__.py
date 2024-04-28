@@ -1,17 +1,13 @@
 from .point import (
     SPoint,
-    STPoint,
-    project_pt_to_road,
-    LAT_PER_METER,
-    LNG_PER_METER
+    STPoint
 )
 from .trajectory import Trajectory
+from .dataset import RecoveryDataset
 
 __all__ = [
     "SPoint",
     "STPoint",
     "Trajectory",
-    "project_pt_to_road",
-    "LAT_PER_METER",
-    "LNG_PER_METER"
+    "RecoveryDataset"
 ]

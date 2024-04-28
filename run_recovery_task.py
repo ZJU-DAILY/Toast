@@ -2,6 +2,7 @@ import argparse
 import torch
 
 from utils.roadmap import SegmentCentricRoadNetwork
+from utils.data import RecoveryDataset
 
 
 def parse_args(args=None):

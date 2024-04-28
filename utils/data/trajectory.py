@@ -1,7 +1,7 @@
 from typing import List
 from datetime import timedelta
 
-from point import (
+from utils.data.point import (
     SPoint,
     STPoint,
     haversine_distance,
@@ -61,12 +61,6 @@ class Trajectory:
         for pre, cur in zip(self.pt_list[:-1], self.pt_list[1:]):
             point_dist_interval.append(haversine_distance(pre, cur))
         return sum(point_dist_interval) / len(point_dist_interval)
-
-    def get_mbr(self):
-        """
-        Calculate the minimum bounding box of the trajectory.
-        """
-        return MBR.cal_mbr(self.pt_list)
 
     def get_start_time(self):
         """

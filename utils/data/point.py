@@ -1,7 +1,7 @@
 import math
 import numpy as np
 
-from utils.roadmap import SegmentCentricRoadNetwork
+from utils.roadmap.road_network import SegmentCentricRoadNetwork
 
 
 DEGREES_TO_RADIANS = math.pi / 180

@@ -3,13 +3,15 @@ import random
 import tqdm
 from chinese_calendar import is_holiday
 import numpy as np
+from typing import List
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch_geometric.data import Data, Batch
 
-from utils.data import SPoint, LAT_PER_METER, LNG_PER_METER
-from utils.data import Trajectory
-from utils.parser import ParseMMTraj
+from utils.data.point import SPoint, LAT_PER_METER, LNG_PER_METER
+from utils.data.trajectory import Trajectory
+from utils.parser.parser import ParseMMTraj
 
 
 class RecoveryDataset(Dataset):
@@ -43,8 +45,8 @@ class RecoveryDataset(Dataset):
         tgt_len = torch.tensor([len(tgt_gps_seq)])
 
         src_influence, tgt_influence = self.get_influence_matrix(src_grid_seq, src_gps_seq, src_len, tgt_len)
-        src_subgraphs = self.build_subgraph(src_influence, src_grid_seq, tgt_rid)
-        return src_grid_seq, src_gps_seq, src_feat, tgt_gps_seq, tgt_rid, tgt_rate, tgt_influence, src_subgraphs
+        src_subgraphs, node_index = self.build_subgraph(src_influence, src_grid_seq, tgt_rid)
+        return src_grid_seq, src_gps_seq, src_feat, tgt_gps_seq, tgt_rid, tgt_rate, tgt_influence, src_subgraphs, node_index
 
     def process(self, traj_dir, win_size, ds_type, keep_ratio):
         parser = ParseMMTraj(self.road_net)
@@ -216,41 +218,69 @@ class RecoveryDataset(Dataset):
         return influence_score
 
     def build_subgraph(self, influence_mat, grid_seq, nid_seq):
-        # todo
         neighbors = self.road_net.get_neighbors()
         src_len = influence_mat.size(0)
-        subgraphs = []
+        subgraphs, node_index = [], []
         for idx in range(src_len):
             if idx == 0:
-                subg = Data(edge_index=None, node_index=torch.tensor(0),
-                            node_weight=torch.tensor([1.]), y=torch.tensor([1.]))
-                subgraphs.append(subg)
+                subg = Data(edge_index=None, weight=torch.tensor([1.]))
+                subg.num_nodes = 1
+                node_index.append(0)
             else:
-                node_index = torch.where(influence_mat[idx] > 0)[0].tolist()
-                if nid_seq[grid_seq[idx][-1]] not in node_index:
-                    node_index.append(nid_seq[grid_seq[idx][-1]])
-        return subgraphs
+                nodes = torch.where(influence_mat[idx] > 0)[0].tolist()
+                if nid_seq[grid_seq[idx][-1]] not in nodes:
+                    nodes.append(nid_seq[grid_seq[idx][-1]])
+                neighbor_nodes = []
+                for n in nodes:
+                    neighbor_nodes.extend(neighbors[n])
+                nodes = list(set.union(set(nodes), set(neighbor_nodes)))
+                node_index.extend(nodes)
+                reindex_map = {nid: reindex for nid, reindex in enumerate(nodes)}
+                edge_index, weight = [], []
+                for n in nodes:
+                    weight.append(influence_mat[idx][n] / influence_mat[idx].sum())
+                    edge_index.extend([[reindex_map[n], reindex_map[nb]] for nb in neighbors[n]])
+                edge_index = torch.tensor(edge_index).T
+                weight = torch.tensor(weight)
+                subg = Data(edge_index=edge_index, weight=weight)
+                subg.num_nodes = len(nodes)
+            subgraphs.append(subg)
+        node_index = torch.tensor(node_index)
+        return Batch.from_data_list(subgraphs), node_index
 
     @staticmethod
     def collate_fn(batch):
-        def recollect_batch(idx):
+        def collate_batch(idx):
             return [sample[idx] for sample in batch]
 
-        def pad_seq(seq_batch, pad_val=.0):
-            seq_len = [len(seq) for seq in seq_batch]
-            dimension = seq_batch[0].size(1)
-            pad_seqs = torch.full((len(seq_batch), max(seq_len), dimension), pad_val)
-            for idx, seq in enumerate(seq_batch):
+        def pad_seq(seq_list, pad_val=.0):
+            seq_len = [len(seq) for seq in seq_list]
+            dimension = seq_list[0].size(1)
+            pad_seqs = torch.full((len(seq_list), max(seq_len), dimension), pad_val)
+            for idx, seq in enumerate(seq_list):
                 length = seq_len[idx]
                 pad_seqs[idx, :length] = seq
             return pad_seqs, torch.tensor(seq_len)
 
+        def pad_graph(graph_list: List[Batch], node_idx_list: List[torch.Tensor], max_seq_len):
+            pad_graph_list, pad_node_list = [], []
+            for graph, node_list in zip(graph_list, node_idx_list):
+                pad_len = max_seq_len - graph.num_graphs
+                pad_g = Data(edge_index=None, weight=torch.tensor([1.]))
+                pad_g.num_nodes = 1
+                pad_node_list.append(torch.tensor(node_list.tolist() + [0] * pad_len))
+                pad_graph_list.append(Batch.from_data_list([graph] + [pad_g] * pad_len))
+            batched_graph = Batch.from_data_list(pad_graph_list)
+            batched_node_index = torch.cat(node_idx_list, dim=-1)
+            return batched_graph, batched_node_index
+
         batch.sort(key=lambda x: len(x[0]), reverse=True)
-        src_grid_seq, src_seq_len = pad_seq(recollect_batch(0))
-        src_gps_seq, _ = pad_seq(recollect_batch(1))
-        feat_seq = torch.tensor(recollect_batch(2))
-        tgt_gps_seq, tgt_seq_len = pad_seq(recollect_batch(3))
-        tgt_node_idx, _ = pad_seq(recollect_batch(4))
-        tgt_rate_seq, _ = pad_seq(recollect_batch(5))
-        tgt_inf_scores = pad_seq(recollect_batch(6))
-        return src_grid_seq, src_gps_seq, feat_seq, src_seq_len, tgt_gps_seq, tgt_node_idx, tgt_rate_seq, tgt_seq_len, tgt_inf_scores
+        src_grid_seq, src_seq_len = pad_seq(collate_batch(0))
+        src_gps_seq, _ = pad_seq(collate_batch(1))
+        feat_seq = torch.tensor(collate_batch(2))
+        tgt_gps_seq, tgt_seq_len = pad_seq(collate_batch(3))
+        tgt_node_idx, _ = pad_seq(collate_batch(4))
+        tgt_rate_seq, _ = pad_seq(collate_batch(5))
+        tgt_inf_scores = pad_seq(collate_batch(6))
+        graph_batch, node_index_batch = pad_graph(collate_batch(7), collate_batch(8), src_seq_len)
+        return src_grid_seq, src_gps_seq, feat_seq, src_seq_len, tgt_gps_seq, tgt_node_idx, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, graph_batch, node_index_batch
