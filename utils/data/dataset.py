@@ -15,12 +15,13 @@ from utils.parser.parser import ParseMMTraj
 
 
 class RecoveryDataset(Dataset):
-    def __init__(self, traj_dir, road_net, region, mode, time_interval, win_size, grid_size, ds_type, keep_ratio, search_dist, gamma):
+    def __init__(self, traj_dir, road_net, region, mode, time_interval, win_size, grid_size, ds_type, keep_ratio, search_dist, beta, gamma):
         self.road_net = road_net
         self.mode = mode
         self.region = region
         self.time_interval = time_interval
         self.search_dist = search_dist
+        self.beta = beta
         self.gamma = gamma
         self.grid_size = grid_size
         self.src_seq, self.tgt_seq = self.process(traj_dir, win_size, ds_type, keep_ratio)
@@ -93,8 +94,8 @@ class RecoveryDataset(Dataset):
                 hours.append(ds_pt.time.hour)
                 t = self.normalize_time(first_pt, ds_pt, self.time_interval)
                 ls_gps_seq.append([ds_pt.lat, ds_pt.lng])
-                locgrid_xid, locgrid_yid = self.gps2grid(ds_pt, self.grid_size)
-                ls_grid_seq.append([locgrid_xid, locgrid_yid, t])
+                grid_x, grid_y = self.road_net.point2grid(ds_pt, self.grid_size)
+                ls_grid_seq.append([grid_x, grid_y, t])
             feat = self.get_pro_feats(ds_pt_list, hours)
             grid_seq.append(ls_grid_seq)
             gps_seq.append(ls_gps_seq)
@@ -174,17 +175,6 @@ class RecoveryDataset(Dataset):
         feat = encoded_hour + [holiday]
         return feat
 
-    def gps2grid(self, pt, grid_size):
-        lat_unit = LAT_PER_METER * grid_size
-        lng_unit = LNG_PER_METER * grid_size
-
-        lat = pt.lat
-        lng = pt.lng
-        min_lat, min_lng = self.region[0], self.region[1]
-        grid_x = int((lat - min_lat) / lat_unit) + 1
-        grid_y = int((lng - min_lng) / lng_unit) + 1
-        return grid_x, grid_y
-
     def get_influence_matrix(self, grid_seq, gps_seq, src_seq_len, tgt_seq_len):
         num_nodes = len(self.road_net.node_set) + 1
         src_influence_score = torch.zeros((src_seq_len, num_nodes), dtype=torch.float)
@@ -192,14 +182,14 @@ class RecoveryDataset(Dataset):
         pre_t = 1
         pre_pt = SPoint(*gps_seq[pre_t])
         src_influence_score[pre_t] = self.cal_influence_score(pre_pt, self.search_dist, self.gamma)
-        tgt_influence_score[pre_t] = self.cal_influence_score(pre_pt, self.search_dist, self.gamma)
+        tgt_influence_score[pre_t] = self.cal_influence_score(pre_pt, self.search_dist, self.beta)
         for idx in range(2, src_seq_len):
             cur_t = grid_seq[idx, 2].tolist()
             cur_pt = SPoint(*gps_seq[idx])
             for t in range(pre_t + 1, cur_t):
                 tgt_influence_score[t] = 1.
             src_influence_score[idx] = self.cal_influence_score(cur_pt, self.search_dist, self.gamma)
-            tgt_influence_score[cur_t] = self.cal_influence_score(cur_pt, self.search_dist, self.gamma)
+            tgt_influence_score[cur_t] = self.cal_influence_score(cur_pt, self.search_dist, self.beta)
             pre_t = cur_t
         tgt_influence_score = torch.clip(tgt_influence_score, 1e-6, 1)
         return src_influence_score, tgt_influence_score
@@ -223,26 +213,28 @@ class RecoveryDataset(Dataset):
         subgraphs, node_index = [], []
         for idx in range(src_len):
             if idx == 0:
-                subg = Data(edge_index=None, weight=torch.tensor([1.]))
+                subg = Data(edge_index=None, weight=torch.tensor([1.]), gt=torch.tensor([1.]))
                 subg.num_nodes = 1
                 node_index.append(0)
             else:
                 nodes = torch.where(influence_mat[idx] > 0)[0].tolist()
                 if nid_seq[grid_seq[idx][-1]] not in nodes:
-                    nodes.append(nid_seq[grid_seq[idx][-1]])
+                    nodes.append(nid_seq[grid_seq[idx][-1]].item())
                 neighbor_nodes = []
                 for n in nodes:
                     neighbor_nodes.extend(neighbors[n])
                 nodes = list(set.union(set(nodes), set(neighbor_nodes)))
                 node_index.extend(nodes)
-                reindex_map = {nid: reindex for nid, reindex in enumerate(nodes)}
+                reindex_map = {nid: rid for rid, nid in enumerate(nodes)}
                 edge_index, weight = [], []
                 for n in nodes:
                     weight.append(influence_mat[idx][n] / influence_mat[idx].sum())
                     edge_index.extend([[reindex_map[n], reindex_map[nb]] for nb in neighbors[n]])
                 edge_index = torch.tensor(edge_index).T
                 weight = torch.tensor(weight)
-                subg = Data(edge_index=edge_index, weight=weight)
+                gt = torch.zeros_like(weight)
+                gt[reindex_map[nid_seq[grid_seq[idx][-1]].item()]] = 1.
+                subg = Data(edge_index=edge_index, weight=weight, gt=gt)
                 subg.num_nodes = len(nodes)
             subgraphs.append(subg)
         node_index = torch.tensor(node_index)
@@ -266,7 +258,7 @@ class RecoveryDataset(Dataset):
             pad_graph_list, pad_node_list = [], []
             for graph, node_list in zip(graph_list, node_idx_list):
                 pad_len = max_seq_len - graph.num_graphs
-                pad_g = Data(edge_index=None, weight=torch.tensor([1.]))
+                pad_g = Data(edge_index=None, weight=torch.tensor([1.]), gt=torch.tensor([1.]))
                 pad_g.num_nodes = 1
                 pad_node_list.append(torch.tensor(node_list.tolist() + [0] * pad_len))
                 pad_graph_list.append(Batch.from_data_list([graph] + [pad_g] * pad_len))

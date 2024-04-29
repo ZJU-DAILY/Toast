@@ -7,7 +7,7 @@ from rtree import Rtree
 from collections import defaultdict
 from torch_geometric.data import Data
 
-from utils.data.point import STPoint, project_pt_to_road
+from utils.data.point import STPoint, project_pt_to_road, rate2gps, LAT_PER_METER, LNG_PER_METER
 
 
 def calculate_spatial_distance(x1, y1, x2, y2):
@@ -33,6 +33,7 @@ class SegmentCentricRoadNetwork:
         self.cord_on_segment = None
         self.cord_offset = None
         self.segment_distance = None
+        self.road_type = None
         self.spatial_index = Rtree()
 
     def is_within_range(self, lat, lng, region=None):
@@ -98,6 +99,14 @@ class SegmentCentricRoadNetwork:
         self.cord_on_segment = cord_on_segment
         self.cord_offset = cord_offset
         self.segment_distance = segment_distance
+
+    def read_road_type(self, type_path):
+        self.road_type = {}
+        with open(type_path, 'r') as type_file:
+            for line in type_file.readlines():
+                items = line.strip().split()
+                segment_id, type_id = int(items[0]), int(items[2])
+                self.road_type[segment_id] = type_id
 
     def range_query(self, query_point, left, bottom, right, top):
         segment_ids = self.spatial_index.intersection((left, bottom, right, top))
@@ -170,3 +179,49 @@ class SegmentCentricRoadNetwork:
         subgraph = Data(edge_index=edge_index, node_index=node_index, batch=node2batch)
         subgraph.num_nodes = subg_nid + 1
         return subgraph
+
+    def get_road_node_feat(self, type_path):
+        self.read_road_type(type_path)
+        neighbor = self.get_neighbors()
+        features = torch.zeros(len(self.node_lst) + 1, 11, dtype=torch.float)
+        max_segment_len = max(self.segment_distance)
+        for seg_id, nid in self.reindex_nodes.items():
+            features[nid + 1][0] = torch.log10(self.segment_distance[seg_id] + 1e-6) / torch.log10(max_segment_len)
+            features[nid + 1][self.road_type[seg_id] + 1] = 1.
+            neighbor_nodes = neighbor[nid]
+            features[nid + 1][9] += len(neighbor_nodes)
+            for nb in neighbor:
+                features[nb + 1][10] += 1.
+        return features
+
+    def point2grid(self, pt, grid_size):
+        lat_unit = LAT_PER_METER * grid_size
+        lng_unit = LNG_PER_METER * grid_size
+        lat = pt.lat
+        lng = pt.lng
+        min_lat, min_lng = self.zone_range[0], self.zone_range[1]
+        grid_x = int((lat - min_lat) / lat_unit) + 1
+        grid_y = int((lng - min_lng) / lng_unit) + 1
+        return grid_x, grid_y
+
+    def roadnet2seq(self, grid_size):
+        def pad_seq(seq_list, pad_val=.0):
+            seq_len = [seq.shape[0] for seq in seq_list]
+            pad_seqs = torch.full((len(seq_list), max(seq_len), 2), pad_val)
+            for idx, seq in enumerate(seq_list):
+                length = seq_len[idx]
+                pad_seqs[idx, :length] = seq
+            return pad_seqs, torch.tensor(seq_len)
+
+        grid_seq = [torch.zeros(1, 2)]
+        for seg_id, _ in self.reindex_nodes:
+            grid = []
+            for rate in range(1000):
+                r = rate / 1000
+                pt = rate2gps(self, seg_id, r)
+                grid_x, grid_y = self.point2grid(pt, grid_size)
+                if len(grid) == 0 or [grid_x, grid_y] != grid[-1]:
+                    grid.append([grid_x, grid_y])
+            grid_seq.append(torch.tensor(grid))
+        grid_seq, grid_len = pad_seq(grid_seq)
+        return grid_seq, grid_len

@@ -1,10 +1,9 @@
 import math
 import random
-from typing import List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv
+from torch_geometric.nn.conv import GATConv
 from torch_geometric.nn.pool import global_mean_pool
 
 from models.base_model import BaseModel
@@ -27,18 +26,6 @@ class RoadGNN(nn.Module):
         self.dropout_layer = nn.Dropout(dropout)
 
     def forward(self, edge_index, node_feat, readout=True, batch=None, weight=None):
-        """
-
-        Args:
-            edge_index:
-            node_feat: torch.Tensor [num_node, feat_dim]
-            readout:
-            batch:
-            weight: torch.Tensor [num_node]
-
-        Returns:
-
-        """
         node_embed = self.dropout_layer(self.gnn_layer(node_feat, edge_index))
         if not readout:
             return node_embed
@@ -213,17 +200,6 @@ class GraphRefinementLayer(nn.Module):
         self.dropout_layer = nn.Dropout(dropout)
 
     def forward(self, seq_embed, edge_index, node_feats, batch, mask2d=None):
-        """
-
-        Args:
-            seq_embed: torch.Tensor (batch_size, src_len, hidden_dim)
-            edge_index:
-            batch: (batch_size, node_size)
-            mask2d:
-
-        Returns:
-
-        """
         batch_size, max_len = seq_embed.size(0), seq_embed.size(1)
         seq_embed = seq_embed.resize(-1, self.hidden_dim)  # (batch_size * src_len->graph num, dim)
         seq2node_embed = torch.index_select(seq_embed, dim=0, index=batch)
@@ -272,12 +248,10 @@ class Encoder(nn.Module):
             seq_embed, node_feats = self.graph_refiner[l](seq_embed, edge_index, node_feats, batch, mask2d)
         encode_seq = self.norm_layer(seq_embed) * mask2d.unsqueeze(-1)
         encode_embed = torch.mean(encode_seq, dim=1)
-
-        lg = self.output_layer(node_feats)  # todo
-
+        logits = self.output_layer(node_feats)
         feat_embed = torch.tanh(self.extra_linear(feat_seq))
         encode_embed = torch.tanh(self.extra_layer(torch.cat((feat_embed, encode_embed), dim=-1)))
-        return encode_seq, encode_embed
+        return encode_seq, encode_embed, logits
 
 
 class DecoderAttention(nn.Module):
@@ -317,8 +291,9 @@ class Decoder(nn.Module):
         pred = torch.clip(pred, 1e-6, 1)
         return torch.log(pred)
 
-    def forward(self, encode_seq, hidden_embed, node_embed, rn_node_feat, traj_seq_len, node_idx, rate_seq, tgt_seq_len, influence_score, tf_ratio=0.5):
-        # todo
+    def forward(self, encode_seq, hidden_embed, node_embed, rn_node_feat,
+                traj_seq_len, node_idx, rate_seq, tgt_seq_len,
+                influence_score, tf_ratio=0.5):
         batch_size, max_len, max_tgt_len = encode_seq.size(0), encode_seq.size(1), node_idx.size(1)
         attn_mask = torch.zeros(batch_size, max_len).to(self.device)
         for bs in range(batch_size):
@@ -357,7 +332,7 @@ class Decoder(nn.Module):
 
 
 class RNTrajRec(BaseModel):
-    def __init__(self, num_rn_node, hidden_dim, num_gnn_layers, num_encoder_layers, extra_input_dim, extra_output_dim, grid_shape: List[int, int], grid_embed_size: int, device, batch_size, dropout=0.1, tf_ratio=0.5):
+    def __init__(self, num_rn_node, hidden_dim, num_gnn_layers, num_encoder_layers, extra_input_dim, extra_output_dim, road_feat_dim, grid_shape, grid_embed_size, batch_size, device, dropout=0.1, tf_ratio=0.5):
         super(RNTrajRec, self).__init__()
         self.batch_size = batch_size
         self.device = device
@@ -373,18 +348,9 @@ class RNTrajRec(BaseModel):
                                       num_layers=num_gnn_layers,
                                       dropout=dropout)
         self.encoder = Encoder(hidden_dim + 3, hidden_dim, num_encoder_layers, extra_input_dim, extra_output_dim, device)
-        self.decoder = None  # todo
+        self.decoder = Decoder(num_rn_node, hidden_dim, road_feat_dim, dropout, device)
 
     def extract_feat(self, road_grid, road_len, road_node_idx, road_edge_index, batch):
-        """
-        todo
-        Args:
-            grid_seq:
-            road_grid: torch.Tensor (num_node in road_net, max_seqlen, 2)
-
-        Returns:
-
-        """
         num_node, max_seqlen = road_grid.shape[0], road_grid.shape[1]
         road_grids = road_grid.reshape(-1, 2)
         grid_input = self.grid_embed_table[road_grids[:, 0], road_grids[:, 1]]
@@ -401,21 +367,29 @@ class RNTrajRec(BaseModel):
         road_embed = self.feat_extractor(road_edge_index, road_node_embed, True, batch)
         return road_embed
 
-    def encoding(self, road_embed, traj_seq, traj_seq_len, feat_seq, traj_node_idx, traj_edge_index, batch, weight):
+    def encoding(self, road_embed, traj_seq, src_seq_len, feat_seq, traj_node_idx, traj_edge, batch, weight):
         node_embed = torch.index_select(road_embed, dim=0, index=traj_node_idx)
         traj_embed = global_mean_pool(node_embed * weight.unsqueeze(1), batch)
         traj_embed = traj_embed.resize((traj_seq.size(0), traj_seq.size(1), -1))
         encode_input = torch.cat((traj_embed, traj_seq), dim=-1)
-        encode_seq, hiddem_embed = self.encoder(encode_input, traj_seq_len, feat_seq, node_embed, traj_edge_index, batch)
-        return encode_seq, hiddem_embed
+        encode_seq, hidden_embed, logits = self.encoder(encode_input, src_seq_len, feat_seq, node_embed, traj_edge, batch)
+        return encode_seq, hidden_embed, logits
 
-    def decoding(self, encode_seq, hidden_embed, traj_seq_len):
-        """ todo """
-        return
+    def decoding(self, encode_seq, hidden_embed, road_embed, rn_node_feat,
+                 src_seq_len, tgt_rid_seq, rate_seq, tgt_seq_len,
+                 influence_score, tf_ratio=0.5):
+        output_node_seq, output_rate_seq = self.decoder(encode_seq, hidden_embed, road_embed, rn_node_feat,
+                                                        src_seq_len, tgt_rid_seq, rate_seq, tgt_seq_len,
+                                                        influence_score, tf_ratio)
+        return output_node_seq, output_rate_seq
 
-    def forward(self, *args):
-        """ todo """
-        self.extract_feat(*args)
-        self.encoding(*args)
-        self.decoding(*args)
-        return
+    def forward(self, road_grid, road_len, road_nodes, road_edge, road_batch, road_feat,
+                src_grid_seq, src_seq_len, feat_seq, traj_node, traj_edge, traj_batch, weight,
+                tgt_rid_seq, tgt_rate_seq, tgt_seq_len, influence_score):
+        road_embed = self.extract_feat(road_grid, road_len, road_nodes, road_edge, road_batch)
+        encoded_seq, hidden_embed, node_logits = self.encoding(road_embed, src_grid_seq, src_seq_len, feat_seq,
+                                                               traj_node, traj_edge, traj_batch, weight)
+        output_node, output_rate = self.decoding(encoded_seq, hidden_embed, road_embed, road_feat,
+                                                 src_seq_len, tgt_rid_seq, tgt_rate_seq, tgt_seq_len,
+                                                 influence_score, self.tf_ratio)
+        return output_node, output_rate, node_logits
