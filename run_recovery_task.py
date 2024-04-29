@@ -4,10 +4,11 @@ import json
 import random
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.optim import AdamW
 
 from utils.roadmap import SegmentCentricRoadNetwork
 from utils.data import SPoint, RecoveryDataset
+from utils.train import RecoveryTrainer
 from models.recovery_model import RNTrajRec
 
 
@@ -73,15 +74,6 @@ def main():
     train_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "train", **dataset_params)
     valid_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "valid", **dataset_params)
     test_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "test", **dataset_params)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
-                              shuffle=config["shuffle"], collate_fn=RecoveryDataset.collate_fn,
-                              num_workers=8, pin_memory=True)
-    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size,
-                              shuffle=config["shuffle"], collate_fn=RecoveryDataset.collate_fn,
-                              num_workers=8, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
-                             shuffle=False, collate_fn=RecoveryDataset.collate_fn,
-                             num_workers=8, pin_memory=True)
 
     model_params = {"hidden_dim": config["hidden_dim"],
                     "num_gnn_layers": config["num_gnn_layers"],
@@ -97,3 +89,15 @@ def main():
                     "tf_ratio": config["tf_ratio"]}
     model = RNTrajRec(num_rn_node=len(road_net.node_lst) + 1, **model_params)
     model.apply(initialize_model)
+
+    optim = AdamW(model.parameters(), lr=config["learning_rate"])
+    trainer = RecoveryTrainer(model, train_dataset, valid_dataset, optim,
+                              num_epochs=args.num_epochs,
+                              data_collator=RecoveryDataset.collate_fn,
+                              batch_size=args.batch_size,
+                              shuffle=config["shuffle"],
+                              num_workers=8,
+                              pin_memory=True,
+                              device=device)
+    trainer.train(road_grid, road_len, subgraph.node_index, subgraph.edge_index, subgraph.batch,
+                  road_feat, [config["lambda1"], config["lambda2"]])
