@@ -17,16 +17,17 @@ class RoadGNN(nn.Module):
             [
                 GATConv(in_channels=input_dim if i == 0 else hidden_dim,
                         out_channels=hidden_dim // num_heads,
-                        num_heads=num_heads,
-                        dropout=dropout,
-                        add_self_loops=True)
+                        heads=num_heads,
+                        dropout=dropout)
                 for i in range(num_layers)
             ]
         )
         self.dropout_layer = nn.Dropout(dropout)
 
     def forward(self, edge_index, node_feat, readout=True, batch=None, weight=None):
-        node_embed = self.dropout_layer(self.gnn_layer(node_feat, edge_index))
+        for layer in self.gnn_layer:
+            node_feat = layer(node_feat, edge_index)
+        node_embed = self.dropout_layer(node_feat)
         if not readout:
             return node_embed
         if weight is None:
@@ -149,6 +150,9 @@ class GraphNorm(nn.Module):
         self.moving_var = torch.ones(1, input_dim)
 
     def graph_norm(self, input_embed, batch, eps=1e-5, momentum=0.9, mask2d=None):
+        if self.moving_mean.device != input_embed.device:
+            self.moving_mean, self.moving_var = self.moving_mean.to(input_embed.device), \
+                                                self.moving_var.to(input_embed.device)
         if not torch.is_grad_enabled():
             embed_hat = (input_embed - self.moving_mean) / torch.sqrt(self.moving_var + eps)
         else:
@@ -195,20 +199,19 @@ class GraphRefinementLayer(nn.Module):
         self.attn_layer = GatedFusion(input_dim, hidden_dim)
         self.graph_forward = GATConv(in_channels=hidden_dim,
                                      out_channels=hidden_dim // num_heads,
-                                     num_heads=num_heads,
-                                     add_self_loops=True)
+                                     heads=num_heads)
         self.dropout_layer = nn.Dropout(dropout)
 
     def forward(self, seq_embed, edge_index, node_feats, batch, mask2d=None):
         batch_size, max_len = seq_embed.size(0), seq_embed.size(1)
-        seq_embed = seq_embed.resize(-1, self.hidden_dim)  # (batch_size * src_len->graph num, dim)
+        seq_embed = seq_embed.reshape(-1, self.hidden_dim)  # (batch_size * src_len->graph num, dim)
         seq2node_embed = torch.index_select(seq_embed, dim=0, index=batch)
 
         norm_feats = self.graph_norm_1(node_feats, batch, mask2d)
         node_feats = node_feats + self.dropout_layer(self.attn_layer(norm_feats, seq2node_embed))
         norm_feats = self.graph_norm_2(node_feats, batch, mask2d)
         node_feats = node_feats + self.dropout_layer(self.graph_forward(norm_feats, edge_index))
-        seq_embed = global_mean_pool(node_feats, batch).resize(batch_size, max_len, -1)
+        seq_embed = global_mean_pool(node_feats, batch).reshape(batch_size, max_len, -1)
         return seq_embed, node_feats
 
 
@@ -265,7 +268,7 @@ class DecoderAttention(nn.Module):
         hidden_embed = hidden_embed.unsqueeze(1).repeat(1, seq_len, 1)
         energy = torch.tanh(self.attn_layer(torch.cat((hidden_embed, encode_embed), dim=-1)))
         attention = self.trans_weight(energy).squeeze(-1)
-        attention = attention.mask_fill(attn_mask == 0, -1e6)
+        attention = attention.masked_fill(attn_mask == 0, -1e6)
         return F.softmax(attention, dim=1)
 
 
@@ -284,7 +287,7 @@ class Decoder(nn.Module):
         self.rate_layer = nn.Linear(hidden_dim + node_feat_dim, 1)
         self.dropout_layer = nn.Dropout(dropout)
 
-    def mask_log_softmax(self, x, mask):
+    def masked_log_softmax(self, x, mask):
         maxes = torch.max(x, dim=1, keepdim=True)[0]
         x_exp = torch.exp(x - maxes) * mask
         pred = x_exp / (x_exp.sum(dim=1, keepdim=True) + 1e-6)
@@ -298,7 +301,7 @@ class Decoder(nn.Module):
         attn_mask = torch.zeros(batch_size, max_len).to(self.device)
         for bs in range(batch_size):
             attn_mask[bs][:traj_seq_len[bs]] = 1.
-        output_node_idx = torch.zeros(batch_size, tgt_seq_len, self.node_size).to(self.device)
+        output_node_idx = torch.zeros(batch_size, max_tgt_len, self.node_size).to(self.device)
         output_rate_seq = torch.zeros(rate_seq.size()).to(self.device)
         input_node = node_idx[:, 0, :].squeeze(-1)  # (batch_size)
         input_rate = rate_seq[:, 0, :].unsqueeze(0)  # (1, batch_size, 1)
@@ -310,14 +313,15 @@ class Decoder(nn.Module):
             weighted_out = torch.bmm(attn.unsqueeze(1), encode_seq).permute(1, 0, 2)  # (1, batch_size, dim)
             rnn_input = torch.cat((weighted_out, node_feat, input_rate), dim=-1)
             rnn_output, hidden_embed = self.rnn(rnn_input, hidden_embed.unsqueeze(0))
+            hidden_embed = hidden_embed.squeeze(0)
 
-            node_prob = self.masked_log_softmax(self.node_layer(rnn_output.squeeze(0)), influence_score[t])
+            node_prob = self.masked_log_softmax(self.node_layer(rnn_output.squeeze(0)), influence_score[:, t, :])
             pred_node = torch.argmax(node_prob, dim=-1)
             pred_node_embed = self.dropout_layer(torch.index_select(node_embed, dim=0, index=pred_node))
-            rate_input = self.tandem_layer(torch.cat((pred_node_embed, hidden_embed.squeeze(0)), dim=-1))
+            rate_input = self.tandem_layer(torch.cat((pred_node_embed, hidden_embed), dim=-1))
             pred_rate = torch.sigmoid(self.rate_layer(torch.cat((rate_input, segment_feat), dim=-1)))
 
-            output_node_idx[:, t, :] = pred_node
+            output_node_idx[:, t, :] = node_prob
             output_rate_seq[:, t] = pred_rate
             teacher_force = random.random() < tf_ratio
 
@@ -370,7 +374,7 @@ class RNTrajRec(BaseModel):
     def encoding(self, road_embed, traj_seq, src_seq_len, feat_seq, traj_node_idx, traj_edge, batch, weight):
         node_embed = torch.index_select(road_embed, dim=0, index=traj_node_idx)
         traj_embed = global_mean_pool(node_embed * weight.unsqueeze(1), batch)
-        traj_embed = traj_embed.resize((traj_seq.size(0), traj_seq.size(1), -1))
+        traj_embed = traj_embed.reshape(traj_seq.size(0), traj_seq.size(1), -1)
         encode_input = torch.cat((traj_embed, traj_seq), dim=-1)
         encode_seq, hidden_embed, logits = self.encoder(encode_input, src_seq_len, feat_seq, node_embed, traj_edge, batch)
         return encode_seq, hidden_embed, logits

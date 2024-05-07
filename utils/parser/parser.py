@@ -3,8 +3,8 @@ import tqdm
 import pickle as pkl
 from datetime import datetime
 
-from utils.data import SPoint, STPoint, project_pt_to_road
-from utils.data import Trajectory
+from utils.data.point import SPoint, STPoint, project_pt_to_road
+from utils.data.trajectory import Trajectory
 
 
 class ParseTraj:

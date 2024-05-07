@@ -1,8 +1,6 @@
 import math
 import numpy as np
 
-from utils.roadmap.road_network import SegmentCentricRoadNetwork
-
 
 DEGREES_TO_RADIANS = math.pi / 180
 RADIANS_TO_DEGREES = 1 / DEGREES_TO_RADIANS
@@ -138,7 +136,7 @@ def project_pt_to_segment(a, b, t):
     return projection, rate, dist
 
 
-def project_pt_to_road(road_net: SegmentCentricRoadNetwork, t, rid):
+def project_pt_to_road(road_net, t, rid):
     """
     Args:
     -----
@@ -175,7 +173,7 @@ def project_pt_to_road(road_net: SegmentCentricRoadNetwork, t, rid):
         return projection, 1, dist
 
 
-def rate2gps(road_net: SegmentCentricRoadNetwork, rid, rate) -> SPoint:
+def rate2gps(road_net, rid, rate) -> SPoint:
     """
     Convert road rate to GPS on the road segment.
     Since one road contains several coordinates, iteratively computing length can be more accurate.

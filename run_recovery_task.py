@@ -15,9 +15,9 @@ from models.recovery_model import RNTrajRec
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="trajectory recovery")
     parser.add_argument("--city", type=str, default="Shanghai")
-    parser.add_argument("--num_epoch", type=int, default=30, help="epochs")
+    parser.add_argument("--num_epochs", type=int, default=30, help="epochs")
     parser.add_argument("--batch_size", type=int, default=64, help="batch size")
-    parser.add_argument("--load_pretrained_flag", action='store_true', help="flag of load pretrained model")
+    parser.add_argument("--saved_path", type=str, default=None, help="model checkpoint")
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
     return parser.parse_args()
@@ -52,15 +52,18 @@ def main():
     file_name = "edgeOSM.txt"
     type_path = "wayTypeOSM.txt"
     zone_range = [41.111975, -8.667057, 41.177462, -8.585305]
+    ckpt_dir = "./ckpt/RNTrajRec-" + args.city if args.saved_path is None else args.saved_path
+    if not os.path.exists(ckpt_dir):
+        os.makedirs(ckpt_dir)
     with open("configs/recovery_config.json", 'r') as config_file:
         config = json.load(config_file)
 
     road_net = SegmentCentricRoadNetwork(road_dir, file_name, zone_range)
     road_net.read_roadnet()
-    subgraph = road_net.to_subgraphs(max_depth=config["max_depth"])
+    subgraph, road_node_index = road_net.to_subgraphs(max_depth=config["max_depth"])
     grid_shape = road_net.point2grid(SPoint(zone_range[2], zone_range[3]), config["grid_size"])
-    grid_shape = (grid_shape[0] + 1, grid_shape[1] + 1)
-    road_grid, road_len = road_net.roadnet2seq(args.grid_size)
+    grid_shape = [grid_shape[0] + 1, grid_shape[1] + 1]
+    road_grid, road_len = road_net.roadnet2seq(config["grid_size"])
     road_feat = road_net.get_road_node_feat(os.path.join(road_dir, type_path))
 
     dataset_params = {"time_interval": config["time_interval"],
@@ -68,6 +71,7 @@ def main():
                       "grid_size": config["grid_size"],
                       "ds_type": config["ds_type"],
                       "keep_ratio": config["keep_ratio"],
+                      "neighbor_dist": config["neighbor_dist"],
                       "search_dist": config["search_dist"],
                       "beta": config["beta"],
                       "gamma": config["gamma"]}
@@ -87,17 +91,31 @@ def main():
                     "device": device,
                     "dropout": config["dropout"],
                     "tf_ratio": config["tf_ratio"]}
-    model = RNTrajRec(num_rn_node=len(road_net.node_lst) + 1, **model_params)
+    model = RNTrajRec(num_rn_node=len(road_net.node_lst) + 1, **model_params).to(device)
     model.apply(initialize_model)
 
     optim = AdamW(model.parameters(), lr=config["learning_rate"])
     trainer = RecoveryTrainer(model, train_dataset, valid_dataset, optim,
                               num_epochs=args.num_epochs,
                               data_collator=RecoveryDataset.collate_fn,
+                              saved_path=ckpt_dir + "/val-best-model.pt",
                               batch_size=args.batch_size,
                               shuffle=config["shuffle"],
                               num_workers=8,
                               pin_memory=True,
                               device=device)
-    trainer.train(road_grid, road_len, subgraph.node_index, subgraph.edge_index, subgraph.batch,
-                  road_feat, [config["lambda1"], config["lambda2"]])
+    trainer.train(road_grid, road_len, road_node_index, subgraph.edge_index, subgraph.batch,
+                  road_feat, road_net, [config["lambda1"], config["lambda2"]], config["decay_ratio"])
+    metric_result = trainer.evaluate(test_dataset, road_grid, road_len, road_node_index,
+                                     subgraph.edge_index, subgraph.batch, road_feat, road_net)
+    print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
+          .format(metric_result[0],
+                  metric_result[1],
+                  metric_result[2],
+                  metric_result[3],
+                  metric_result[4],
+                  metric_result[5]))
+
+
+if __name__ == "__main__":
+    main()

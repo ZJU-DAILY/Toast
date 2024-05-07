@@ -5,7 +5,8 @@ import torch
 from queue import Queue
 from rtree import Rtree
 from collections import defaultdict
-from torch_geometric.data import Data
+from torch_geometric.data import Data, Batch
+from torch_geometric.utils import add_self_loops
 
 from utils.data.point import STPoint, project_pt_to_road, rate2gps, LAT_PER_METER, LNG_PER_METER
 
@@ -135,50 +136,48 @@ class SegmentCentricRoadNetwork:
         num_nodes = len(self.node_lst) + 1
         neighbors = self.get_neighbors()
 
-        node2batch = {}
-        subg_nid = 0
-        node_index_map = {}  # node id (in subgraph) -> node id (in road net)
+        subgraphs = []
         node_index = []
-        edge_index = []
-        subgraph_idx = 0
         for nid in range(num_nodes):
+            edge_index = []
             if nid == 0:
-                node_index.append(subg_nid)
-                node_index_map[subg_nid] = nid
-                node2batch[subg_nid] = subgraph_idx
+                subg = Data(edge_index=torch.tensor(edge_index))
+                subg.num_nodes = 1
+                subg.edge_index, _ = add_self_loops(subg.edge_index, num_nodes=subg.num_nodes)
+                node_index.append(0)
+                subgraphs.append(subg)
             else:
+                rid = nid - 1
                 rset, cset = set(), set()
                 q = Queue()
-                subg_nid += 1
-                node_index.append(subg_nid)
-                node_index_map[subg_nid] = nid
-                node2batch[subg_nid] = subgraph_idx
-                q.put((subg_nid, 0))
-                rset.add(nid)
+                q.put((rid, 0))
+                rset.add(rid)
                 while not q.empty():
                     idx, depth = q.get()
-                    rid = node_index_map[idx]
                     if depth == max_depth:
                         continue
-                    if rid in cset:
+                    if idx in cset:
                         continue
-                    cset.add(rid)
-                    for nrid in neighbors[rid - 1]:
-                        subg_nid += 1
-                        node_index.append(subg_nid)
-                        node_index_map[subg_nid] = nrid + 1
-                        node2batch[subg_nid] = subgraph_idx
-                        edge_index.append([idx, subg_nid])
-                        rset.add(nrid + 1)
-                        q.put((subg_nid, depth + 1))
-            subgraph_idx += 1
-        edge_index = torch.tensor(edge_index).T
-        node2batch = torch.tensor(list(node2batch.keys()))
-        node_index = list(map(lambda x: node_index_map[x], node_index))
+                    cset.add(idx)
+                    for nb in neighbors[idx]:
+                        edge_index.append([idx, nb])
+                        rset.add(nb)
+                        q.put((nb, depth + 1))
+                rset = list(rset)
+                node_reindex = {node: nid for nid, node in enumerate(rset)}
+                edge_index = [[node_reindex[edge[0]], node_reindex[edge[1]]] for edge in edge_index]
+                if len(edge_index) > 0:
+                    edge_index, _ = add_self_loops(torch.tensor(edge_index, dtype=torch.long).T, num_nodes=len(rset))
+                else:
+                    edge_index, _ = add_self_loops(torch.tensor([], dtype=torch.long), num_nodes=len(rset))
+                rset = [nid + 1 for nid in rset]
+                node_index.extend(rset)
+                subg = Data(edge_index=edge_index)
+                subg.num_nodes = len(rset)
+                subgraphs.append(subg)
+        subgraph = Batch.from_data_list(subgraphs)
         node_index = torch.tensor(node_index)
-        subgraph = Data(edge_index=edge_index, node_index=node_index, batch=node2batch)
-        subgraph.num_nodes = subg_nid + 1
-        return subgraph
+        return subgraph, node_index
 
     def get_road_node_feat(self, type_path):
         self.read_road_type(type_path)
@@ -186,11 +185,11 @@ class SegmentCentricRoadNetwork:
         features = torch.zeros(len(self.node_lst) + 1, 11, dtype=torch.float)
         max_segment_len = max(self.segment_distance)
         for seg_id, nid in self.reindex_nodes.items():
-            features[nid + 1][0] = torch.log10(self.segment_distance[seg_id] + 1e-6) / torch.log10(max_segment_len)
+            features[nid + 1][0] = math.log10(self.segment_distance[seg_id] + 1e-6) / math.log10(max_segment_len)
             features[nid + 1][self.road_type[seg_id] + 1] = 1.
             neighbor_nodes = neighbor[nid]
             features[nid + 1][9] += len(neighbor_nodes)
-            for nb in neighbor:
+            for nb in neighbor_nodes:
                 features[nb + 1][10] += 1.
         return features
 
@@ -205,16 +204,16 @@ class SegmentCentricRoadNetwork:
         return grid_x, grid_y
 
     def roadnet2seq(self, grid_size):
-        def pad_seq(seq_list, pad_val=.0):
+        def pad_seq(seq_list, pad_val=0):
             seq_len = [seq.shape[0] for seq in seq_list]
-            pad_seqs = torch.full((len(seq_list), max(seq_len), 2), pad_val)
+            pad_seqs = torch.full((len(seq_list), max(seq_len), 2), pad_val, dtype=torch.long)
             for idx, seq in enumerate(seq_list):
                 length = seq_len[idx]
                 pad_seqs[idx, :length] = seq
             return pad_seqs, torch.tensor(seq_len)
 
         grid_seq = [torch.zeros(1, 2)]
-        for seg_id, _ in self.reindex_nodes:
+        for seg_id, _ in self.reindex_nodes.items():
             grid = []
             for rate in range(1000):
                 r = rate / 1000

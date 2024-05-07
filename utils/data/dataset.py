@@ -1,6 +1,7 @@
 import os
 import random
 import tqdm
+import math
 from chinese_calendar import is_holiday
 import numpy as np
 from typing import List
@@ -8,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch_geometric.data import Data, Batch
+from torch_geometric.utils import add_self_loops
 
 from utils.data.point import SPoint, LAT_PER_METER, LNG_PER_METER
 from utils.data.trajectory import Trajectory
@@ -15,11 +17,12 @@ from utils.parser.parser import ParseMMTraj
 
 
 class RecoveryDataset(Dataset):
-    def __init__(self, traj_dir, road_net, region, mode, time_interval, win_size, grid_size, ds_type, keep_ratio, search_dist, beta, gamma):
+    def __init__(self, traj_dir, road_net, region, mode, time_interval, win_size, grid_size, ds_type, keep_ratio, neighbor_dist, search_dist, beta, gamma):
         self.road_net = road_net
         self.mode = mode
         self.region = region
         self.time_interval = time_interval
+        self.neighbor_dist = neighbor_dist
         self.search_dist = search_dist
         self.beta = beta
         self.gamma = gamma
@@ -41,7 +44,7 @@ class RecoveryDataset(Dataset):
         tgt_gps_seq = self.add_start_token(tgt_gps_seq)
         tgt_rid = self.add_start_token(tgt_rid)
         tgt_rate = self.add_start_token(tgt_rate)
-        src_feat = torch.tensor(self.src_seq[2][index])
+        src_feat = torch.tensor(self.src_seq[2][index], dtype=torch.float)
         src_len = torch.tensor([len(src_grid_seq)])
         tgt_len = torch.tensor([len(tgt_gps_seq)])
 
@@ -121,7 +124,7 @@ class RecoveryDataset(Dataset):
     def add_start_token(seq):
         dimension = len(seq[0])
         start_seq = [0] * dimension
-        return [start_seq] + seq
+        return torch.tensor([start_seq] + seq)
 
     @staticmethod
     def split_traj(traj, win_size):
@@ -176,35 +179,35 @@ class RecoveryDataset(Dataset):
         return feat
 
     def get_influence_matrix(self, grid_seq, gps_seq, src_seq_len, tgt_seq_len):
-        num_nodes = len(self.road_net.node_set) + 1
+        num_nodes = len(self.road_net.node_lst) + 1
         src_influence_score = torch.zeros((src_seq_len, num_nodes), dtype=torch.float)
         tgt_influence_score = torch.zeros((tgt_seq_len, num_nodes), dtype=torch.float) + 1e-6
         pre_t = 1
-        pre_pt = SPoint(*gps_seq[pre_t])
-        src_influence_score[pre_t] = self.cal_influence_score(pre_pt, self.search_dist, self.gamma)
+        pre_pt = SPoint(*gps_seq[pre_t].tolist())
+        src_influence_score[pre_t] = self.cal_influence_score(pre_pt, self.neighbor_dist, self.gamma)
         tgt_influence_score[pre_t] = self.cal_influence_score(pre_pt, self.search_dist, self.beta)
         for idx in range(2, src_seq_len):
             cur_t = grid_seq[idx, 2].tolist()
-            cur_pt = SPoint(*gps_seq[idx])
+            cur_pt = SPoint(*gps_seq[idx].tolist())
             for t in range(pre_t + 1, cur_t):
                 tgt_influence_score[t] = 1.
-            src_influence_score[idx] = self.cal_influence_score(cur_pt, self.search_dist, self.gamma)
+            src_influence_score[idx] = self.cal_influence_score(cur_pt, self.neighbor_dist, self.gamma)
             tgt_influence_score[cur_t] = self.cal_influence_score(cur_pt, self.search_dist, self.beta)
             pre_t = cur_t
         tgt_influence_score = torch.clip(tgt_influence_score, 1e-6, 1)
         return src_influence_score, tgt_influence_score
 
     def cal_influence_score(self, pt, search_dist, gamma):
-        influence_score = torch.zeros(len(self.road_net.node_set) + 1, dtype=torch.float)
+        influence_score = torch.zeros(len(self.road_net.node_lst) + 1, dtype=torch.float)
         region = (pt.lng - search_dist * LNG_PER_METER, pt.lat - search_dist * LAT_PER_METER,
                   pt.lng + search_dist * LNG_PER_METER, pt.lat + search_dist * LAT_PER_METER)
         query_results = self.road_net.range_query(pt, *region)
-        if len(query_results) == 0:
-            influence_score = torch.ones(len(self.road_net.node_set) + 1, dtype=torch.float)
-        else:
+        if query_results is not None:
             for pt in query_results:
-                nid = self.road_net.reindex_nodes[pt.segment_id]
-                influence_score[nid] = torch.exp(-pt.error ** 2 / gamma ** 2)
+                nid = self.road_net.reindex_nodes[pt.segment_id] + 1
+                influence_score[nid] = math.exp(-pow(pt.error, 2) / pow(gamma, 2))
+        else:
+            influence_score = torch.ones(len(self.road_net.node_lst) + 1, dtype=torch.float)
         return influence_score
 
     def build_subgraph(self, influence_mat, grid_seq, nid_seq):
@@ -213,8 +216,9 @@ class RecoveryDataset(Dataset):
         subgraphs, node_index = [], []
         for idx in range(src_len):
             if idx == 0:
-                subg = Data(edge_index=None, weight=torch.tensor([1.]), gt=torch.tensor([1.]))
+                subg = Data(edge_index=torch.tensor([]), weight=torch.tensor([1.]), gt=torch.tensor([1.]))
                 subg.num_nodes = 1
+                subg.edge_index, _ = add_self_loops(subg.edge_index, num_nodes=subg.num_nodes)
                 node_index.append(0)
             else:
                 nodes = torch.where(influence_mat[idx] > 0)[0].tolist()
@@ -222,15 +226,22 @@ class RecoveryDataset(Dataset):
                     nodes.append(nid_seq[grid_seq[idx][-1]].item())
                 neighbor_nodes = []
                 for n in nodes:
-                    neighbor_nodes.extend(neighbors[n])
+                    neighbor_nodes.extend(neighbors[n - 1])
+                neighbor_nodes = [nid + 1 for nid in neighbor_nodes]
                 nodes = list(set.union(set(nodes), set(neighbor_nodes)))
                 node_index.extend(nodes)
                 reindex_map = {nid: rid for rid, nid in enumerate(nodes)}
                 edge_index, weight = [], []
                 for n in nodes:
                     weight.append(influence_mat[idx][n] / influence_mat[idx].sum())
-                    edge_index.extend([[reindex_map[n], reindex_map[nb]] for nb in neighbors[n]])
-                edge_index = torch.tensor(edge_index).T
+                    for nb in neighbors[n - 1]:
+                        if ((nb + 1) in reindex_map) and ((nb + 1) != n):
+                            edge_index.append([reindex_map[n], reindex_map[nb + 1]])
+                if len(edge_index) > 0:
+                    edge_index = torch.tensor(edge_index, dtype=torch.long).T
+                    edge_index, _ = add_self_loops(edge_index, num_nodes=len(nodes))
+                else:
+                    edge_index, _ = add_self_loops(torch.tensor([], dtype=torch.long), num_nodes=len(nodes))
                 weight = torch.tensor(weight)
                 gt = torch.zeros_like(weight)
                 gt[reindex_map[nid_seq[grid_seq[idx][-1]].item()]] = 1.
@@ -258,21 +269,30 @@ class RecoveryDataset(Dataset):
             pad_graph_list, pad_node_list = [], []
             for graph, node_list in zip(graph_list, node_idx_list):
                 pad_len = max_seq_len - graph.num_graphs
-                pad_g = Data(edge_index=None, weight=torch.tensor([1.]), gt=torch.tensor([1.]))
-                pad_g.num_nodes = 1
-                pad_node_list.append(torch.tensor(node_list.tolist() + [0] * pad_len))
-                pad_graph_list.append(Batch.from_data_list([graph] + [pad_g] * pad_len))
+                if pad_len > 0:
+                    pad_g = Data(edge_index=torch.tensor([], dtype=torch.long),
+                                 weight=torch.tensor([1.]), gt=torch.tensor([1.]))
+                    pad_g.num_nodes = 1
+                    pad_g.edge_index, _ = add_self_loops(pad_g.edge_index, num_nodes=pad_g.num_nodes)
+                    pad_batch = Batch.from_data_list([pad_g] * pad_len)
+                    pad_node_list.append(torch.tensor(node_list.tolist() + [0] * pad_len))
+                    pad_graph_list.append(Batch.from_data_list([graph, pad_batch]))
+                else:
+                    if hasattr(graph, "ptr"):
+                        del graph.ptr
+                    pad_node_list.append(node_list)
+                    pad_graph_list.append(graph)
             batched_graph = Batch.from_data_list(pad_graph_list)
-            batched_node_index = torch.cat(node_idx_list, dim=-1)
+            batched_node_index = torch.cat(pad_node_list, dim=-1)
             return batched_graph, batched_node_index
 
         batch.sort(key=lambda x: len(x[0]), reverse=True)
         src_grid_seq, src_seq_len = pad_seq(collate_batch(0))
         src_gps_seq, _ = pad_seq(collate_batch(1))
-        feat_seq = torch.tensor(collate_batch(2))
+        feat_seq = torch.stack(collate_batch(2), dim=0)
         tgt_gps_seq, tgt_seq_len = pad_seq(collate_batch(3))
         tgt_node_idx, _ = pad_seq(collate_batch(4))
         tgt_rate_seq, _ = pad_seq(collate_batch(5))
-        tgt_inf_scores = pad_seq(collate_batch(6))
-        graph_batch, node_index_batch = pad_graph(collate_batch(7), collate_batch(8), src_seq_len)
+        tgt_inf_scores, _ = pad_seq(collate_batch(6))
+        graph_batch, node_index_batch = pad_graph(collate_batch(7), collate_batch(8), src_seq_len.max())
         return src_grid_seq, src_gps_seq, feat_seq, src_seq_len, tgt_gps_seq, tgt_node_idx, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, graph_batch, node_index_batch
