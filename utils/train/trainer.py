@@ -1,7 +1,7 @@
 from typing import Callable
 import os
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from torch.optim import Optimizer
 
 from models.base_model import BaseModel
@@ -46,6 +46,20 @@ class Trainer:
             *args
     ):
         raise NotImplementedError
+
+    def get_train_dataloader(self):
+        return DataLoader(self.train_dataset, **self.dataloader_params)
+
+    def get_eval_dataloader(self):
+        return DataLoader(self.eval_dataset, **self.dataloader_params)
+
+    def get_test_dataloader(self, dataset):
+        return DataLoader(dataset,
+                          batch_size=self.dataloader_params["batch_size"],
+                          shuffle=False,
+                          collate_fn=self.dataloader_params["collate_fn"],
+                          num_workers=self.dataloader_params["num_workers"],
+                          pin_memory=self.dataloader_params["pin_memory"])
 
     def save_state(self):
         torch.save(self.model.state_dict(), self.saved_path)

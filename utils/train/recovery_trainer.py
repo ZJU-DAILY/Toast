@@ -61,7 +61,7 @@ class RecoveryTrainer(Trainer):
         road_edge, road_batch = road_edge.long().to(self.device), road_batch.to(self.device)
         road_feat = road_feat.to(self.device)
         best_loss = float("inf")
-        train_loader = DataLoader(self.train_dataset, **self.dataloader_params)
+        train_loader = self.get_train_dataloader()
         for epoch in tqdm.tqdm(range(self.num_epochs), total=self.num_epochs):
             self.model.train()
             for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
@@ -122,15 +122,10 @@ class RecoveryTrainer(Trainer):
     ):
         self.model.eval()
         if test_dataset is None:
-            eval_loader = DataLoader(self.eval_dataset, **self.dataloader_params)
+            eval_loader = self.get_eval_dataloader()
             mode = "eval"
         else:
-            eval_loader = DataLoader(test_dataset,
-                                     batch_size=self.dataloader_params["batch_size"],
-                                     shuffle=False,
-                                     collate_fn=self.dataloader_params["collate_fn"],
-                                     num_workers=self.dataloader_params["num_workers"],
-                                     pin_memory=self.dataloader_params["pin_memory"])
+            eval_loader = self.get_test_dataloader(test_dataset)
             self.load_state()
             mode = "test"
         road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)

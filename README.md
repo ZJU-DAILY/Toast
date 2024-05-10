@@ -4,7 +4,8 @@ Python implementation of Toast: Task-oriented Augmentation for Spatio-Temporal D
 ## TODO
 - [x] Build an Encoder-Decoder architecture
 - [x] Prepare necessary parts for model training
-- [ ] Downstream task 1 (trajectory recovery)
+- [x] Downstream task 1 (trajectory recovery)
+- [ ] Design Augmentor
 - [ ] Task-oriented augmentation
 - [ ] Downstream task 2 (trajectory similarity searching)
 - [ ] Downstream task 3 (TBD)
