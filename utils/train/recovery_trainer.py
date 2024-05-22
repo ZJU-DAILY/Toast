@@ -1,5 +1,5 @@
 import tqdm
-from typing import Union, Callable
+from typing import Union, Callable, Optional, List
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -54,7 +54,7 @@ class RecoveryTrainer(Trainer):
             enc_loss = -1 * (pred_logit * true_logit).sum() / src_len.sum()
             return node_loss + rate_loss * weights[0] + enc_loss * weights[1]
         else:
-            return node_loss + rate_loss
+            return node_loss + rate_loss * weights[0]
 
     def train(self, road_grid, road_len, road_nodes, road_edge, road_batch, road_feat, road_net, weights, decay_param):
         road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)
@@ -62,7 +62,8 @@ class RecoveryTrainer(Trainer):
         road_feat = road_feat.to(self.device)
         best_loss = float("inf")
         train_loader = self.get_train_dataloader()
-        for epoch in tqdm.tqdm(range(self.num_epochs), total=self.num_epochs):
+        for epoch in range(self.num_epochs):
+            print("[start {}-th training]".format(epoch))
             self.model.train()
             for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
                 src_grid_seq, src_gps_seq, feat_seq, src_seq_len, \
@@ -96,9 +97,10 @@ class RecoveryTrainer(Trainer):
                                          tgt_node_seq, tgt_rate_seq, batched_graph.gt,
                                          src_seq_len, tgt_seq_len, weights)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
                 self.optimizer.step()
             eval_loss = self.evaluate(
-                None, road_grid, road_len, road_nodes, road_edge, road_batch, road_feat, road_net
+                None, road_grid, road_len, road_nodes, road_edge, road_batch, road_feat, road_net, weights
             )
             if self.saved_path is not None:
                 if eval_loss < best_loss:
@@ -118,7 +120,8 @@ class RecoveryTrainer(Trainer):
             road_edge: torch.Tensor = None,
             road_batch: torch.Tensor = None,
             road_feat: torch.Tensor = None,
-            road_net: SegmentCentricRoadNetwork = None
+            road_net: SegmentCentricRoadNetwork = None,
+            weights: Optional[List[float]] = None
     ):
         self.model.eval()
         if test_dataset is None:
@@ -155,11 +158,11 @@ class RecoveryTrainer(Trainer):
                 output_rate = output_rate.squeeze(-1)
                 acc, prec, recall, f1 = evaluate_point_prediction(output_node[:, 1:, :],
                                                                   tgt_node_seq[:, 1:, :],
-                                                                  tgt_seq_len)
+                                                                  tgt_seq_len - 1)
                 mae, rmse = evaluate_distance_regression(output_node[:, 1:, :],
                                                          output_rate[:, 1:],
                                                          tgt_gps_seq[:, 1:, :],
-                                                         tgt_seq_len,
+                                                         tgt_seq_len - 1,
                                                          road_net)
                 output_node_dim = output_node.size(2)
                 output_node = output_node.permute(1, 0, 2)[1:]
@@ -171,7 +174,7 @@ class RecoveryTrainer(Trainer):
                 tgt_rate_seq = tgt_rate_seq.permute(1, 0, 2)[1:].squeeze(-1)  # ((len - 1), batch_size)
                 loss = self.compute_loss(output_node, output_rate, None,
                                          tgt_node_seq, tgt_rate_seq, None,
-                                         src_seq_len, tgt_seq_len, None)
+                                         src_seq_len, tgt_seq_len, weights)
                 total_acc += acc
                 total_prec += prec
                 total_recall += recall

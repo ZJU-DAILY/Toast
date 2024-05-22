@@ -57,8 +57,8 @@ class RecoveryDataset(Dataset):
         src_file = os.path.join(traj_dir, "{}/{}_input.txt".format(self.mode, self.mode))
         tgt_file = os.path.join(traj_dir, "{}/{}_output.txt".format(self.mode, self.mode))
 
-        src_trajs = parser.parse(src_file, is_target=False)
-        tgt_trajs = parser.parse(tgt_file, is_target=True)
+        src_trajs = parser.parse(src_file, is_target=False, is_save=True)
+        tgt_trajs = parser.parse(tgt_file, is_target=True, is_save=True)
         assert len(src_trajs) == len(tgt_trajs)
 
         src_grid_seq, src_gps_seq, src_feat_seq = [], [], []

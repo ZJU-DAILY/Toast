@@ -61,6 +61,14 @@ class Trainer:
                           num_workers=self.dataloader_params["num_workers"],
                           pin_memory=self.dataloader_params["pin_memory"])
 
+    def freeze_model(self):
+        for p in self.model.parameters():
+            p.requires_grad = False
+
+    def unfreeze_model(self):
+        for p in self.model.parameters():
+            p.requires_grad = True
+
     def save_state(self):
         torch.save(self.model.state_dict(), self.saved_path)
 

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn.conv import GATConv
-from torch_geometric.nn.pool import global_mean_pool
+from torch_geometric.nn.pool import global_mean_pool, global_max_pool, global_add_pool
 
 from models.base_model import BaseModel
 
@@ -13,20 +13,23 @@ class RoadGNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_layers, dropout, num_heads=8):
         super(RoadGNN, self).__init__()
         assert hidden_dim % num_heads == 0
+        self.num_layers = num_layers
         self.gnn_layer = nn.ModuleList(
             [
                 GATConv(in_channels=input_dim if i == 0 else hidden_dim,
                         out_channels=hidden_dim // num_heads,
                         heads=num_heads,
-                        dropout=dropout)
+                        add_self_loops=False)
                 for i in range(num_layers)
             ]
         )
         self.dropout_layer = nn.Dropout(dropout)
 
     def forward(self, edge_index, node_feat, readout=True, batch=None, weight=None):
-        for layer in self.gnn_layer:
+        for idx, layer in enumerate(self.gnn_layer):
             node_feat = layer(node_feat, edge_index)
+            if idx < self.num_layers - 1:
+                node_feat = F.leaky_relu(node_feat)
         node_embed = self.dropout_layer(node_feat)
         if not readout:
             return node_embed
@@ -131,13 +134,14 @@ class TransformerEncoder(nn.Module):
         self.norm_layer_1 = Norm(hidden_dim)
         self.norm_layer_2 = Norm(hidden_dim)
         self.norm_layer_3 = Norm(hidden_dim)
-        self.dropout_layer = nn.Dropout(dropout)
+        self.dropout_layer_1 = nn.Dropout(dropout)
+        self.dropout_layer_2 = nn.Dropout(dropout)
 
     def forward(self, x, mask, norm=False):
         x2 = self.norm_layer_1(x)
-        x = x + self.dropout_layer(self.attn_layer(x2, x2, x2, mask))
+        x = x + self.dropout_layer_1(self.attn_layer(x2, x2, x2, mask))
         x2 = self.norm_layer_2(x)
-        x = x + self.dropout_layer(self.feed_forward(x2))
+        x = x + self.dropout_layer_2(self.feed_forward(x2))
         return x if not norm else self.norm_layer_3(x)
 
 
@@ -199,7 +203,8 @@ class GraphRefinementLayer(nn.Module):
         self.attn_layer = GatedFusion(input_dim, hidden_dim)
         self.graph_forward = GATConv(in_channels=hidden_dim,
                                      out_channels=hidden_dim // num_heads,
-                                     heads=num_heads)
+                                     heads=num_heads,
+                                     add_self_loops=False)
         self.dropout_layer = nn.Dropout(dropout)
 
     def forward(self, seq_embed, edge_index, node_feats, batch, mask2d=None):
@@ -237,7 +242,17 @@ class Encoder(nn.Module):
         self.extra_linear = nn.Linear(extra_input_dim, extra_output_dim)
         self.extra_layer = nn.Linear(hidden_dim + extra_output_dim, hidden_dim)
 
-    def forward(self, traj_seq, traj_seq_len, feat_seq, node_feats, edge_index, batch):
+    def mask_log_softmax(self, logits, batch, weight):
+        maxes = global_max_pool(logits, batch)
+        maxes = torch.index_select(maxes, dim=0, index=batch)
+        exp_nodes = torch.exp(logits - maxes) * weight.unsqueeze(-1)
+
+        sums = global_add_pool(exp_nodes, batch)
+        sums = torch.index_select(sums, dim=0, index=batch)
+        pred = exp_nodes / (sums + 1e-6)
+        return torch.log(torch.clip(pred, 1e-6, 1))
+
+    def forward(self, traj_seq, traj_seq_len, feat_seq, node_feats, edge_index, batch, weight):
         batch_size, max_len = traj_seq.size(0), traj_seq.size(1)
         mask3d = torch.zeros(batch_size, max_len, max_len).to(self.device)
         mask2d = torch.zeros(batch_size, max_len).to(self.device)
@@ -252,6 +267,7 @@ class Encoder(nn.Module):
         encode_seq = self.norm_layer(seq_embed) * mask2d.unsqueeze(-1)
         encode_embed = torch.mean(encode_seq, dim=1)
         logits = self.output_layer(node_feats)
+        logits = self.mask_log_softmax(logits, batch, weight)
         feat_embed = torch.tanh(self.extra_linear(feat_seq))
         encode_embed = torch.tanh(self.extra_layer(torch.cat((feat_embed, encode_embed), dim=-1)))
         return encode_seq, encode_embed, logits
@@ -376,7 +392,7 @@ class RNTrajRec(BaseModel):
         traj_embed = global_mean_pool(node_embed * weight.unsqueeze(1), batch)
         traj_embed = traj_embed.reshape(traj_seq.size(0), traj_seq.size(1), -1)
         encode_input = torch.cat((traj_embed, traj_seq), dim=-1)
-        encode_seq, hidden_embed, logits = self.encoder(encode_input, src_seq_len, feat_seq, node_embed, traj_edge, batch)
+        encode_seq, hidden_embed, logits = self.encoder(encode_input, src_seq_len, feat_seq, node_embed, traj_edge, batch, weight)
         return encode_seq, hidden_embed, logits
 
     def decoding(self, encode_seq, hidden_embed, road_embed, rn_node_feat,

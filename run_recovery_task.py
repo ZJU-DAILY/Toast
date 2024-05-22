@@ -107,7 +107,8 @@ def main():
     trainer.train(road_grid, road_len, road_node_index, subgraph.edge_index, subgraph.batch,
                   road_feat, road_net, [config["lambda1"], config["lambda2"]], config["decay_ratio"])
     metric_result = trainer.evaluate(test_dataset, road_grid, road_len, road_node_index,
-                                     subgraph.edge_index, subgraph.batch, road_feat, road_net)
+                                     subgraph.edge_index, subgraph.batch, road_feat, road_net,
+                                     [config["lambda1"], config["lambda2"]])
     print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
           .format(metric_result[0],
                   metric_result[1],
