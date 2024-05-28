@@ -89,8 +89,7 @@ def main():
                     "grid_embed_size": config["grid_embed_size"],
                     "batch_size": args.batch_size,
                     "device": device,
-                    "dropout": config["dropout"],
-                    "tf_ratio": config["tf_ratio"]}
+                    "dropout": config["dropout"]}
     model = RNTrajRec(num_rn_node=len(road_net.node_lst) + 1, **model_params).to(device)
     model.apply(initialize_model)
 
@@ -105,9 +104,9 @@ def main():
                               pin_memory=True,
                               device=device)
     trainer.train(road_grid, road_len, road_node_index, subgraph.edge_index, subgraph.batch,
-                  road_feat, road_net, [config["lambda1"], config["lambda2"]], config["decay_ratio"])
+                  road_feat, road_net, [config["lambda1"], config["lambda2"]], config["decay_ratio"], config["tf_ratio"])
     metric_result = trainer.evaluate(test_dataset, road_grid, road_len, road_node_index,
-                                     subgraph.edge_index, subgraph.batch, road_feat, road_net,
+                                     subgraph.edge_index, subgraph.batch, road_feat, .0, road_net,
                                      [config["lambda1"], config["lambda2"]])
     print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
           .format(metric_result[0],

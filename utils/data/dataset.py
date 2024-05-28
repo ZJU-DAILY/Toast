@@ -233,7 +233,7 @@ class RecoveryDataset(Dataset):
                 reindex_map = {nid: rid for rid, nid in enumerate(nodes)}
                 edge_index, weight = [], []
                 for n in nodes:
-                    weight.append(influence_mat[idx][n] / influence_mat[idx].sum())
+                    weight.append(influence_mat[idx][n])
                     for nb in neighbors[n - 1]:
                         if ((nb + 1) in reindex_map) and ((nb + 1) != n):
                             edge_index.append([reindex_map[n], reindex_map[nb + 1]])
