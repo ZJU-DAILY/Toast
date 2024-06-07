@@ -10,6 +10,7 @@ from utils.roadmap import SegmentCentricRoadNetwork
 from utils.data import SPoint, RecoveryDataset
 from utils.train import RecoveryTrainer
 from models.recovery_model import RNTrajRec
+from augment.augmentor import AugmentConfig, Augmentor
 
 
 def parse_args(args=None):
@@ -17,6 +18,7 @@ def parse_args(args=None):
     parser.add_argument("--city", type=str, default="Shanghai")
     parser.add_argument("--num_epochs", type=int, default=30, help="epochs")
     parser.add_argument("--batch_size", type=int, default=64, help="batch size")
+    parser.add_argument("--phase", type=str, default=None, help="select from `train`, `test`, `augment`")
     parser.add_argument("--saved_path", type=str, default=None, help="model checkpoint")
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
@@ -28,6 +30,7 @@ def set_random_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def initialize_model(model):
@@ -48,6 +51,7 @@ def main():
     set_random_seed(args.seed)
     device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
     traj_dir = os.path.join("./data", args.city)
+    phase = args.phase
     road_dir = "./data/roadnet"
     file_name = "edgeOSM.txt"
     type_path = "wayTypeOSM.txt"
@@ -103,18 +107,37 @@ def main():
                               num_workers=8,
                               pin_memory=True,
                               device=device)
-    trainer.train(road_grid, road_len, road_node_index, subgraph.edge_index, subgraph.batch,
-                  road_feat, road_net, [config["lambda1"], config["lambda2"]], config["decay_ratio"], config["tf_ratio"])
-    metric_result = trainer.evaluate(test_dataset, road_grid, road_len, road_node_index,
-                                     subgraph.edge_index, subgraph.batch, road_feat, .0, road_net,
-                                     [config["lambda1"], config["lambda2"]])
-    print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
-          .format(metric_result[0],
-                  metric_result[1],
-                  metric_result[2],
-                  metric_result[3],
-                  metric_result[4],
-                  metric_result[5]))
+    if (phase is None) or (phase == "train"):
+        trainer.train(road_grid, road_len, road_node_index, subgraph.edge_index, subgraph.batch,
+                      road_feat, road_net, [config["lambda1"], config["lambda2"]], config["decay_ratio"], config["tf_ratio"])
+        metric_result = trainer.evaluate(test_dataset, road_grid, road_len, road_node_index,
+                                         subgraph.edge_index, subgraph.batch, road_feat, .0, road_net,
+                                         [config["lambda1"], config["lambda2"]])
+        print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
+              .format(metric_result[0],
+                      metric_result[1],
+                      metric_result[2],
+                      metric_result[3],
+                      metric_result[4],
+                      metric_result[5]))
+    elif (phase is None) or (phase == "test"):
+        trainer.load_state()
+        metric_result = trainer.evaluate(test_dataset, road_grid, road_len, road_node_index,
+                                         subgraph.edge_index, subgraph.batch, road_feat, .0, road_net,
+                                         [config["lambda1"], config["lambda2"]])
+        print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
+              .format(metric_result[0],
+                      metric_result[1],
+                      metric_result[2],
+                      metric_result[3],
+                      metric_result[4],
+                      metric_result[5]))
+    elif (phase is None) or (phase == "augment"):
+        trainer.load_state()
+        augment_config = AugmentConfig(num_virtual_tokens=20, augment_type="PU", num_epochs=args.num_epochs)
+        augmentor = Augmentor(augment_config, trainer, None, device)
+        augmentor.augment_points(road_grid, road_len, road_node_index, subgraph.edge_index, subgraph.batch,
+                                 road_feat, [config["lambda1"], config["lambda2"]])
 
 
 if __name__ == "__main__":
