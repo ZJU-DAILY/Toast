@@ -120,8 +120,8 @@ def main():
                       metric_result[3],
                       metric_result[4],
                       metric_result[5]))
-    elif (phase is None) or (phase == "test"):
-        trainer.load_state()
+    if (phase is None) or (phase == "test"):
+        trainer.load_model()
         metric_result = trainer.evaluate(test_dataset, road_grid, road_len, road_node_index,
                                          subgraph.edge_index, subgraph.batch, road_feat, .0, road_net,
                                          [config["lambda1"], config["lambda2"]])
@@ -132,12 +132,21 @@ def main():
                       metric_result[3],
                       metric_result[4],
                       metric_result[5]))
-    elif (phase is None) or (phase == "augment"):
-        trainer.load_state()
+    if (phase is None) or (phase == "augment"):
+        trainer.load_model()
         augment_config = AugmentConfig(num_virtual_tokens=20, augment_type="PU", num_epochs=args.num_epochs)
         augmentor = Augmentor(augment_config, trainer, None, device)
         augmentor.augment_points(road_grid, road_len, road_node_index, subgraph.edge_index, subgraph.batch,
                                  road_feat, [config["lambda1"], config["lambda2"]])
+        augment_result = augmentor.evaluate_augment(test_dataset, road_net, road_grid, road_len, road_node_index,
+                                                    subgraph.edge_index, subgraph.batch, road_feat)
+        print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
+              .format(augment_result[0],
+                      augment_result[1],
+                      augment_result[2],
+                      augment_result[3],
+                      augment_result[4],
+                      augment_result[5]))
 
 
 if __name__ == "__main__":

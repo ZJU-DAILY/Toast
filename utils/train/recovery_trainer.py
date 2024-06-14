@@ -107,8 +107,8 @@ class RecoveryTrainer(Trainer):
                 if eval_loss < best_loss:
                     print("saving best model.")
                     best_loss = eval_loss
-                    self.save_state()
-            if (epoch % 1 == 0) or (epoch == self.num_epochs - 1):
+                    self.save_model()
+            if (epoch + 1) % 5 == 0:
                 print("valid loss: {:.4f}".format(eval_loss))
             tf_ratio = tf_ratio * decay_param
 
@@ -125,14 +125,14 @@ class RecoveryTrainer(Trainer):
             road_net: SegmentCentricRoadNetwork = None,
             weights: Optional[List[float]] = None
     ):
-        self.model.eval()
         if test_dataset is None:
             eval_loader = self.get_eval_dataloader()
             mode = "eval"
         else:
             eval_loader = self.get_test_dataloader(test_dataset)
-            self.load_state()
+            self.load_model()
             mode = "test"
+        self.model.eval()
         road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)
         road_edge, road_batch = road_edge.long().to(self.device), road_batch.to(self.device)
         road_feat = road_feat.to(self.device)

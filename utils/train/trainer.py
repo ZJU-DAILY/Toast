@@ -69,10 +69,9 @@ class Trainer:
         for p in self.model.parameters():
             p.requires_grad = True
 
-    def save_state(self):
-        torch.save(self.model.state_dict(), self.saved_path)
+    def save_model(self):
+        torch.save(self.model, self.saved_path)
 
-    def load_state(self):
+    def load_model(self):
         device = torch.device(self.device) if isinstance(self.device, str) else self.device
-        model_state = torch.load(self.saved_path, map_location=device)
-        self.model.load_state_dict(model_state)
+        self.model = torch.load(self.saved_path, map_location=device)
