@@ -15,6 +15,7 @@ Python implementation of Toast: Task-oriented Augmentation for Spatio-Temporal D
   - [ ] implement GPS point union
   - [ ] implement trajectory union
   - [ ] implement attribution join
+- [ ] Cost Models for augmentation strategy selection
 - [ ] Task-oriented augmentation
 - [ ] Downstream task 2 (trajectory similarity searching)
 - [ ] Downstream task 3 (TBD)
