@@ -21,7 +21,7 @@ class RecoveryTrainer(Trainer):
             optimizer: Optimizer,
             num_epochs: int,
             data_collator: Callable,
-            saved_path: str,
+            saved_dir: str,
             batch_size: int,
             shuffle: bool,
             num_workers: int,
@@ -35,7 +35,7 @@ class RecoveryTrainer(Trainer):
                                               optimizer,
                                               num_epochs,
                                               data_collator,
-                                              saved_path,
+                                              saved_dir,
                                               batch_size=batch_size,
                                               shuffle=shuffle,
                                               num_workers=num_workers,
@@ -103,11 +103,11 @@ class RecoveryTrainer(Trainer):
             eval_loss = self.evaluate(
                 None, road_grid, road_len, road_nodes, road_edge, road_batch, road_feat, .0, road_net, weights
             )
-            if self.saved_path is not None:
+            if self.saved_dir is not None:
                 if eval_loss < best_loss:
                     print("saving best model.")
                     best_loss = eval_loss
-                    self.save_model()
+                    self.save_model(save_optim=True)
             if (epoch + 1) % 5 == 0:
                 print("valid loss: {:.4f}".format(eval_loss))
             tf_ratio = tf_ratio * decay_param

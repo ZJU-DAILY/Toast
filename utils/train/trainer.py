@@ -16,7 +16,7 @@ class Trainer:
             optimizer: Optimizer,
             num_epochs: int,
             data_collator: Callable,
-            saved_path: str,
+            saved_dir: str,
             **kwargs
     ):
         self.model = model
@@ -24,7 +24,7 @@ class Trainer:
         self.eval_dataset = eval_dataset
         self.optimizer = optimizer
         self.num_epochs = num_epochs
-        self.saved_path = saved_path
+        self.saved_dir = saved_dir
         self.device = kwargs["device"]
         self.dataloader_params = {
             "batch_size": kwargs["batch_size"],
@@ -69,9 +69,14 @@ class Trainer:
         for p in self.model.parameters():
             p.requires_grad = True
 
-    def save_model(self):
-        torch.save(self.model, self.saved_path)
+    def save_model(self, save_optim=False):
+        model_path = self.saved_dir + "/val-best-model.pt"
+        torch.save(self.model, model_path)
+        if save_optim:
+            optim_path = self.saved_dir + "/optimizer.bin"
+            torch.save(self.optimizer.state_dict(), optim_path)
 
     def load_model(self):
         device = torch.device(self.device) if isinstance(self.device, str) else self.device
-        self.model = torch.load(self.saved_path, map_location=device)
+        model_path = self.saved_dir + "/val-best-model.pt"
+        self.model = torch.load(model_path, map_location=device)
