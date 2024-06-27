@@ -1,10 +1,18 @@
+import enum
 from typing import Union, Optional, List
 from trak.projectors import ProjectionType
+
+
+class TaskType(str, enum.Enum):
+    TRAJ_REC = "TRAJ_REC"
+    TRAJ_SIM = "TRAJ_SIM"
+    TRANS_TYPE = "TRANS_TYPE"
 
 
 class PointUnionConfig:
     def __init__(
             self,
+            task_type: Optional[TaskType],
             num_virtual_tokens: int = 5,
             augment_type: Optional[Union[str, List[str]]] = None,
             virtual_dim: int = 512,
@@ -13,6 +21,7 @@ class PointUnionConfig:
             projection: bool = True,
             project_hidden_dim: int = 256
     ):
+        self.task_type = task_type
         self.num_virtual_tokens = num_virtual_tokens
         self.augment_type = augment_type
         self.virtual_dim = virtual_dim
@@ -26,6 +35,7 @@ class PointUnionConfig:
 class TrajUnionConfig:
     def __init__(
             self,
+            task_type: Optional[TaskType],
             num_augments,
             proj_type=ProjectionType.rademacher,
             proj_dim=8192,
@@ -33,6 +43,7 @@ class TrajUnionConfig:
             beta2=0.999,
             eps=1e-8
     ):
+        self.task_type = task_type
         self.num_augments = num_augments
         self.proj_type = proj_type
         self.proj_dim = proj_dim
@@ -43,6 +54,8 @@ class TrajUnionConfig:
 
 class AttrJoinConfig:
     def __init__(
-            self
+            self,
+            task_type: Optional[TaskType]
     ):
+        self.task_type = task_type
         pass
