@@ -16,9 +16,9 @@ class BaseModel(nn.Module):
         raise NotImplementedError
 
 
-class FeatExtractor(nn.Module):
+class FeatureExtractor(nn.Module):
     def __init__(self):
-        super(FeatExtractor, self).__init__()
+        super(FeatureExtractor, self).__init__()
 
     def forward(self):
         pass
@@ -43,7 +43,7 @@ class Decoder(nn.Module):
 class RNTrajRec(nn.Module):
     def __init__(self):
         super(RNTrajRec, self).__init__()
-        self.extractor = FeatExtractor()
+        self.extractor = FeatureExtractor()
         self.encoder = Encoder()
         self.decoder = Decoder()
 

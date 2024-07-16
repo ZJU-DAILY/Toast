@@ -3,11 +3,13 @@ from .point import (
     STPoint
 )
 from .trajectory import Trajectory
-from .dataset import RecoveryDataset
+from .recovery_dataset import RecoveryDataset
+from .identify_dataset import ModeIdentifyDataset
 
 __all__ = [
     "SPoint",
     "STPoint",
     "Trajectory",
-    "RecoveryDataset"
+    "RecoveryDataset",
+    "ModeIdentifyDataset"
 ]

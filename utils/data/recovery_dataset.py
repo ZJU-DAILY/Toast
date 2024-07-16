@@ -17,9 +17,10 @@ from utils.parser.parser import ParseMMTraj
 
 
 class RecoveryDataset(Dataset):
-    def __init__(self, traj_dir, road_net, region, mode, time_interval, win_size, grid_size, ds_type, keep_ratio, neighbor_dist, search_dist, beta, gamma):
+    def __init__(self, traj_dir, road_net, region, mode, model_type, time_interval, win_size, grid_size, ds_type, keep_ratio, neighbor_dist, search_dist, beta, gamma):
         self.road_net = road_net
         self.mode = mode
+        self.model_type = model_type
         self.region = region
         self.time_interval = time_interval
         self.neighbor_dist = neighbor_dist
@@ -49,8 +50,11 @@ class RecoveryDataset(Dataset):
         tgt_len = torch.tensor([len(tgt_gps_seq)])
 
         src_influence, tgt_influence = self.get_influence_matrix(src_grid_seq, src_gps_seq, src_len, tgt_len)
-        src_subgraphs, node_index = self.build_subgraph(src_influence, src_grid_seq, tgt_rid)
-        return src_grid_seq, src_gps_seq, src_feat, tgt_gps_seq, tgt_rid, tgt_rate, tgt_influence, src_subgraphs, node_index
+        if self.model_type == "MTrajRec":
+            return src_grid_seq, src_gps_seq, src_feat, tgt_gps_seq, tgt_rid, tgt_rate, tgt_influence, None, None
+        else:
+            src_subgraphs, node_index = self.build_subgraph(src_influence, src_grid_seq, tgt_rid)
+            return src_grid_seq, src_gps_seq, src_feat, tgt_gps_seq, tgt_rid, tgt_rate, tgt_influence, src_subgraphs, node_index
 
     def process(self, traj_dir, win_size, ds_type, keep_ratio):
         parser = ParseMMTraj(self.road_net)
@@ -63,7 +67,7 @@ class RecoveryDataset(Dataset):
 
         src_grid_seq, src_gps_seq, src_feat_seq = [], [], []
         tgt_gps_seq, tgt_idx_seq, tgt_rate_seq = [], [], []
-        keep_ratio = 1. if self.mode == "test" else keep_ratio
+        keep_ratio = 1. if self.mode == "test" or self.mode == "augment" else keep_ratio
         for (src_traj, tgt_traj) in tqdm.tqdm(zip(src_trajs, tgt_trajs), total=len(src_trajs)):
             grid_seq, gps_seq, feat_seq = self.process_src_traj(src_traj, win_size, ds_type, keep_ratio)
             mm_gps_seq, mm_rid_seq, mm_rate_seq = self.process_tgt_traj(tgt_traj, win_size)
@@ -83,6 +87,7 @@ class RecoveryDataset(Dataset):
     def process_src_traj(self, traj, win_size, ds_type, keep_ratio):
         traj_splits = self.split_traj(traj, win_size)
         grid_seq, gps_seq, feat_seq = [], [], []
+        num_drops = 5
         for sub_traj in traj_splits:
             pt_list = sub_traj.pt_list
             if keep_ratio != 1:
@@ -94,6 +99,9 @@ class RecoveryDataset(Dataset):
             ls_gps_seq = []
             first_pt = ds_pt_list[0]
             for ds_pt in ds_pt_list:
+                if self.mode == "test" and num_drops > 1 and random.random() < 0.5:
+                    num_drops -= 1
+                    continue
                 hours.append(ds_pt.time.hour)
                 t = self.normalize_time(first_pt, ds_pt, self.time_interval)
                 ls_gps_seq.append([ds_pt.lat, ds_pt.lng])
@@ -291,8 +299,11 @@ class RecoveryDataset(Dataset):
         src_gps_seq, _ = pad_seq(collate_batch(1))
         feat_seq = torch.stack(collate_batch(2), dim=0)
         tgt_gps_seq, tgt_seq_len = pad_seq(collate_batch(3))
-        tgt_node_idx, _ = pad_seq(collate_batch(4))
+        tgt_node_idx, _ = pad_seq(collate_batch(4), 0)
         tgt_rate_seq, _ = pad_seq(collate_batch(5))
         tgt_inf_scores, _ = pad_seq(collate_batch(6))
-        graph_batch, node_index_batch = pad_graph(collate_batch(7), collate_batch(8), src_seq_len.max())
-        return src_grid_seq, src_gps_seq, feat_seq, src_seq_len, tgt_gps_seq, tgt_node_idx, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, graph_batch, node_index_batch
+        if collate_batch(7)[0] is None:
+            return src_grid_seq, src_gps_seq, feat_seq, src_seq_len, tgt_gps_seq, tgt_node_idx, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, None, None
+        else:
+            graph_batch, node_index_batch = pad_graph(collate_batch(7), collate_batch(8), src_seq_len.max())
+            return src_grid_seq, src_gps_seq, feat_seq, src_seq_len, tgt_gps_seq, tgt_node_idx, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, graph_batch, node_index_batch

@@ -14,7 +14,6 @@ class PointUnionConfig:
             self,
             task_type: Optional[TaskType],
             num_virtual_tokens: int = 5,
-            augment_type: Optional[Union[str, List[str]]] = None,
             virtual_dim: int = 512,
             num_epochs: int = 10,
             learning_rate: float = 1e-3,
@@ -23,7 +22,6 @@ class PointUnionConfig:
     ):
         self.task_type = task_type
         self.num_virtual_tokens = num_virtual_tokens
-        self.augment_type = augment_type
         self.virtual_dim = virtual_dim
         self.num_epochs = num_epochs
 

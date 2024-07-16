@@ -1,38 +1,73 @@
 {
-  "temperature": 5,
-  "num_gnn_layers": 2,
-  "num_encoder_layers": 2,
-  "max_depth": 3,
+  "RNTrajRec": {
+    "temperature": 5,
+    "num_gnn_layers": 2,
+    "num_encoder_layers": 2,
+    "max_depth": 3,
 
-  "load_pretrain_flag": true,
+    "load_pretrain_flag": true,
 
-  "search_dist": 50,
-  "neighbor_dist": 400,
-  "beta": 15,
-  "gamma": 30,
+    "search_dist": 50,
+    "neighbor_dist": 400,
+    "beta": 15,
+    "gamma": 30,
 
-  "road_feat_dim": 11,
-  "extra_input_dim": 25,
-  "extra_output_dim": 8,
+    "road_feat_dim": 11,
+    "extra_input_dim": 25,
+    "extra_output_dim": 8,
 
-  "keep_ratio": 0.125,
-  "grid_size": 50,
-  "time_interval": 15,
-  "win_size": 1000,
-  "ds_type": "random",
-  "shuffle": true,
+    "keep_ratio": 0.125,
+    "grid_size": 50,
+    "time_interval": 15,
+    "win_size": 1000,
+    "ds_type": "random",
+    "shuffle": true,
 
-  "hidden_dim": 512,
-  "grid_embed_size": 512,
-  "dropout": 0.1,
+    "hidden_dim": 512,
+    "grid_embed_size": 512,
+    "dropout": 0.1,
 
-  "lambda1": 10,
-  "lambda2": 0.1,
-  "learning_rate": 1e-3,
-  "tf_ratio": 0.5,
-  "decay_flag": true,
-  "decay_ratio": 0.9,
-  "clip": 1,
-  "log_step": 1,
-  "verbose_flag": false
+    "lambda1": 10,
+    "lambda2": 0.1,
+    "learning_rate": 1e-3,
+    "tf_ratio": 0.5,
+    "decay_flag": true,
+    "decay_ratio": 0.9,
+    "clip": 1,
+    "log_step": 1,
+    "verbose_flag": false
+  },
+
+  "MTrajRec": {
+    "max_depth": 3,
+    "search_dist": 50,
+    "neighbor_dist": 400,
+    "beta": 15,
+    "gamma": 30,
+
+    "road_feat_dim": 11,
+    "extra_input_dim": 25,
+    "extra_output_dim": 8,
+
+    "keep_ratio": 0.125,
+    "grid_size": 50,
+    "time_interval": 15,
+    "win_size": 1000,
+    "ds_type": "random",
+    "shuffle": true,
+
+    "hidden_dim": 512,
+    "grid_embed_size": 512,
+    "dropout": 0.1,
+
+    "lambda1": 10,
+    "lambda2": 0.1,
+    "learning_rate": 1e-3,
+    "tf_ratio": 0.5,
+    "decay_flag": true,
+    "decay_ratio": 0.9,
+    "clip": 1,
+    "log_step": 1,
+    "verbose_flag": false
+  }
 }
