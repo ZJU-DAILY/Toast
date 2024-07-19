@@ -72,9 +72,9 @@ def main():
     graph = read_graph(data_dir)
 
     dataset_config = {
-        "input_len": 12,
-        "output_len": 3,
-        "feat_dim": 989,
+        "input_len": config["input_len"],
+        "output_len": config["output_len"],
+        "feat_dim": config["feat_dim"],
     }
     train_dataset = PredictDataset(data_dir, features=features, mode="train", **dataset_config)
     valid_dataset = PredictDataset(data_dir, features=features, mode="valid", **dataset_config)
@@ -83,7 +83,7 @@ def main():
     model_params = {
         "input_dim": config["input_dim"],
         "output_dim": config["output_dim"],
-        "feat_dim": config["feat_dim"],
+        "feat_dim": 989,
         "hidden_dim": config["hidden_dim"]
     }
     model = STMetaNet(**model_params).to(device)
