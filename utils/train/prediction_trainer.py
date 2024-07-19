@@ -1,0 +1,104 @@
+import tqdm
+from typing import Union, Callable, Optional, List
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset
+from torch.optim import Optimizer
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
+
+from models.base_model import BaseModel
+from utils.train.trainer import Trainer
+
+
+class PredictTrainer(Trainer):
+    def __init__(
+            self,
+            model: BaseModel,
+            train_dataset: Dataset,
+            eval_dataset: Dataset,
+            optimizer: Optimizer,
+            num_epochs: int,
+            data_collator: Callable,
+            saved_dir: str,
+            batch_size: int,
+            shuffle: bool,
+            num_workers: int,
+            pin_memory: bool,
+            device: Union[str, torch.device] = "cpu",
+            **kwargs
+    ):
+        super(PredictTrainer, self).__init__(model,
+                                             train_dataset,
+                                             eval_dataset,
+                                             optimizer,
+                                             num_epochs,
+                                             data_collator,
+                                             saved_dir,
+                                             batch_size=batch_size,
+                                             shuffle=shuffle,
+                                             num_workers=num_workers,
+                                             pin_memory=pin_memory,
+                                             device=device)
+        for key, val in kwargs.items():
+            setattr(self, key, val)
+
+    def compute_loss(self, pred_flow, true_flow):
+        regression_criterion = nn.MSELoss(reduction="mean")
+
+        loss = regression_criterion(pred_flow, true_flow)
+        return loss
+
+    def train(self, edge_index, scaler):
+        train_loader = self.get_train_dataloader()
+        edge_index = edge_index.to(self.device)
+        min_rmse = float("inf")
+        for epoch in range(self.num_epochs):
+            print("[start {}-th training]".format(epoch + 1))
+            self.model.train()
+            for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
+                flow, features, labels = batch
+                flow, features, labels = flow.to(self.device), features.to(self.device), labels.to(self.device)
+
+                self.optimizer.zero_grad()
+                predicts, labels = self.model(flow, features, labels, edge_index, train_mode=True)
+                loss = self.compute_loss(predicts, labels)
+                loss.backward()
+                self.optimizer.step()
+
+            results = self.evaluate(edge_index=edge_index, scaler=scaler)
+            if self.saved_dir is not None:
+                if results[0] < min_rmse:
+                    print("saving best model.")
+                    min_rmse = results[0]
+                    self.save_model(save_optim=True)
+            if (epoch + 1) % 5 == 0:
+                print("valid rmse: {:.4f}".format(results[-1]))
+
+    @torch.no_grad()
+    def evaluate(
+            self,
+            test_dataset: Dataset = None,
+            edge_index=None,
+            scaler=None
+    ):
+        if test_dataset is None:
+            eval_loader = self.get_eval_dataloader()
+            mode = "eval"
+        else:
+            eval_loader = self.get_test_dataloader(test_dataset)
+            self.load_model()
+            mode = "test"
+        self.model.eval()
+        edge_index = edge_index.to(self.device)
+        cnt, rmse, mae = 0., 0., 0.
+        for batch in tqdm.tqdm(eval_loader, total=len(eval_loader), desc=mode):
+            flow, features, labels = batch
+            flow, features, labels = flow.to(self.device), features.to(self.device), labels.to(self.device)
+            predicts, labels = self.model(flow, features, labels, edge_index, train_mode=False)
+
+            preds, labels = scaler.inverse_transform(predicts), scaler.inverse_transform(labels)
+            cnt += preds.numel()
+            rmse += torch.sum((preds - labels) ** 2)
+            mae += torch.sum(torch.abs(preds - labels))
+        return torch.sqrt(rmse / (cnt + 1e-8)).item(), (mae / (cnt + 1e-8)).item()
