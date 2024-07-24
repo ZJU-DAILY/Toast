@@ -10,12 +10,13 @@ from torch_geometric.data import Data
 
 from utils.data import PredictDataset
 from utils.train import PredictTrainer
-from models.prediction_model import STMetaNet
+from models.prediction_model import STMetaNet, STResNet
 
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="traffic flow prediction")
     parser.add_argument("--dataset", type=str, default="Beijing")
+    parser.add_argument("--model_type", type=str, default="STMetaNet")
     parser.add_argument("--num_epochs", type=int, default=20, help="epochs")
     parser.add_argument("--batch_size", type=int, default=64, help="batch size")
     parser.add_argument("--phase", type=str, default=None, help="select from `train`, `test`, `augment`")
@@ -33,12 +34,16 @@ def set_random_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def read_feature(data_dir):
+def read_feature(data_dir, feat_dim):
+    print(f"[read data features with dimension {feat_dim}...]")
     feat_path = os.path.join(data_dir, "BJ_FEATURE.h5")
     with h5py.File(feat_path, 'r') as feat_f:
         feat_data = np.array(feat_f["embeddings"])
-    row_size, col_size, _ = feat_data.shape
-    feat_data = feat_data.reshape((row_size * col_size, -1))
+    row_size, col_size, dimension = feat_data.shape
+    feat_data = feat_data.reshape(row_size * col_size, -1)
+    if feat_dim < dimension:
+        feat_data[:, feat_dim:] = 0.
+        # feat_data = feat_data[:, :feat_dim]
     feat_data = (feat_data - feat_data.mean(axis=0)) / (np.std(feat_data, axis=0) + 1e-8)
     return feat_data
 
@@ -60,33 +65,53 @@ def main():
     set_random_seed(args.seed)
     device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
     data_dir = os.path.join("./data", args.dataset)
+    model_type = args.model_type
     phase = args.phase
     with open("configs/predict_config.json", 'r') as config_file:
-        config = json.load(config_file)
+        configs = json.load(config_file)
+        config = configs[model_type]
     feat_dim = config["feat_dim"]
-    ckpt_dir = f"./ckpt/STMetaNet-{args.dataset}-{feat_dim}" if args.saved_path is None else args.saved_path
+    ckpt_dir = f"./ckpt/{model_type}-{args.dataset}-{feat_dim}" if args.saved_path is None else args.saved_path
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
 
-    features = read_feature(data_dir)
+    features = read_feature(data_dir, config["feat_dim"])
     graph = read_graph(data_dir)
 
-    dataset_config = {
-        "input_len": config["input_len"],
-        "output_len": config["output_len"],
-        "feat_dim": config["feat_dim"],
-    }
-    train_dataset = PredictDataset(data_dir, features=features, mode="train", **dataset_config)
-    valid_dataset = PredictDataset(data_dir, features=features, mode="valid", **dataset_config)
-    test_dataset = PredictDataset(data_dir, features=features, mode="test", **dataset_config)
+    if model_type == "STMetaNet":
+        dataset_config = {
+            "input_len": config["input_len"],
+            "output_len": config["output_len"],
+        }
+    else:
+        dataset_config = {
+            "closeness_length": config["closeness_length"],
+            "period_length": config["period_length"],
+            "trend_length": config["trend_length"],
+            "period_interval": config["period_interval"],
+            "trend_interval": config["trend_interval"]
+        }
+    train_dataset = PredictDataset(data_dir, features=features, mode="train", model_type=model_type, **dataset_config)
+    valid_dataset = PredictDataset(data_dir, features=features, mode="valid", model_type=model_type, **dataset_config)
+    test_dataset = PredictDataset(data_dir, features=features, mode="test", model_type=model_type, **dataset_config)
 
-    model_params = {
-        "input_dim": config["input_dim"],
-        "output_dim": config["output_dim"],
-        "feat_dim": 989,
-        "hidden_dim": config["hidden_dim"]
-    }
-    model = STMetaNet(**model_params).to(device)
+    if model_type == "STMetaNet":
+        model_params = {
+            "input_dim": config["input_dim"],
+            "output_dim": config["output_dim"],
+            "feat_dim": config["feat_dim"],
+            "hidden_dim": config["hidden_dim"]
+        }
+        model = STMetaNet(**model_params).to(device)
+    else:
+        model_params = {
+            "closeness_len": config["closeness_length"],
+            "period_len": config["period_length"],
+            "trend_len": config["trend_length"],
+            "feat_dim": 989,
+            "num_layers": config["num_layers"]
+        }
+        model = STResNet(2, 32, 32, **model_params).to(device)
 
     optim = AdamW(model.parameters(), lr=config["learning_rate"])
     trainer = PredictTrainer(model, train_dataset, valid_dataset, optim,

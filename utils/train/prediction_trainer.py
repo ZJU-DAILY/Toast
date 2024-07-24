@@ -51,18 +51,29 @@ class PredictTrainer(Trainer):
 
     def train(self, edge_index, scaler):
         train_loader = self.get_train_dataloader()
-        edge_index = edge_index.to(self.device)
+        edge_index = None if edge_index is None else edge_index.to(self.device)
         min_rmse = float("inf")
         for epoch in range(self.num_epochs):
             print("[start {}-th training]".format(epoch + 1))
             self.model.train()
             for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
-                flow, features, labels = batch
-                flow, features, labels = flow.to(self.device), features.to(self.device), labels.to(self.device)
-
                 self.optimizer.zero_grad()
-                predicts, labels = self.model(flow, features, labels, edge_index, train_mode=True)
-                loss = self.compute_loss(predicts, labels)
+                if self.train_dataset.model_type == "STMetaNet":
+                    flow, features, labels = batch
+                    flow, features, labels = flow.to(self.device), features.to(self.device), labels.to(self.device)
+                    predicts, labels = self.model(flow, features, labels, edge_index, train_mode=True)
+                    loss = self.compute_loss(predicts, labels)
+                else:
+                    close_data, period_data, trend_data, features, labels = batch
+                    close_data, period_data, trend_data, features, labels = (
+                        close_data.to(self.device),
+                        period_data.to(self.device),
+                        trend_data.to(self.device),
+                        features.to(self.device),
+                        labels.to(self.device)
+                    )
+                    predicts = self.model(close_data, period_data, trend_data, features)
+                    loss = self.compute_loss(predicts, labels)
                 loss.backward()
                 self.optimizer.step()
 
@@ -90,12 +101,23 @@ class PredictTrainer(Trainer):
             self.load_model()
             mode = "test"
         self.model.eval()
-        edge_index = edge_index.to(self.device)
+        edge_index = None if edge_index is None else edge_index.to(self.device)
         cnt, rmse, mae = 0., 0., 0.
         for batch in tqdm.tqdm(eval_loader, total=len(eval_loader), desc=mode):
-            flow, features, labels = batch
-            flow, features, labels = flow.to(self.device), features.to(self.device), labels.to(self.device)
-            predicts, labels = self.model(flow, features, labels, edge_index, train_mode=False)
+            if self.train_dataset.model_type == "STMetaNet":
+                flow, features, labels = batch
+                flow, features, labels = flow.to(self.device), features.to(self.device), labels.to(self.device)
+                predicts, labels = self.model(flow, features, labels, edge_index, train_mode=False)
+            else:
+                close_data, period_data, trend_data, features, labels = batch
+                close_data, period_data, trend_data, features, labels = (
+                    close_data.to(self.device),
+                    period_data.to(self.device),
+                    trend_data.to(self.device),
+                    features.to(self.device),
+                    labels.to(self.device)
+                )
+                predicts = self.model(close_data, period_data, trend_data, features)
 
             preds, labels = scaler.inverse_transform(predicts), scaler.inverse_transform(labels)
             cnt += preds.numel()
