@@ -1,0 +1,21 @@
+{
+  "ST2Vec": {
+    "spatial_dim": 64,
+    "temporal_dim": 64,
+    "feature_dim": 64,
+    "hidden_dim": 128,
+    "num_layers": 1,
+    "dropout_rate": 0,
+    "learning_rate": 1e-3,
+    "shuffle": true
+  },
+  "GTS": {
+    "spatial_dim": 64,
+    "feature_dim": 64,
+    "hidden_dim": 128,
+    "num_layers": 1,
+    "dropout_rate": 0,
+    "learning_rate": 1e-3,
+    "shuffle": true
+  }
+}

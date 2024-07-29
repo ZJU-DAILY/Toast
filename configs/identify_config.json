@@ -1,0 +1,8 @@
+{
+  "max_length": 248,
+  "shuffle": true,
+  "learning_rate": 1e-3,
+  "input_dim": 2,
+  "num_classes": 5,
+  "hidden_dims": [32, 64, 128]
+}

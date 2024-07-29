@@ -1,6 +1,7 @@
 import math
 import random
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,12 +69,75 @@ class MetaGAT(MessagePassing):
         return new_states
 
 
+class MetaLinear(nn.Module):
+    def __init__(self, input_dim, in_features, out_features):
+        super(MetaLinear, self).__init__()
+        self.in_features, self.out_features = in_features, out_features
+        self.dense = nn.Sequential(
+            nn.Linear(input_dim, 16),
+            nn.Sigmoid(),
+            nn.Linear(16, 2),
+            nn.Sigmoid(),
+            nn.Linear(2, in_features * out_features)
+        )
+        self.bias = nn.Sequential(
+            nn.Linear(input_dim, 16),
+            nn.Sigmoid(),
+            nn.Linear(16, 2),
+            nn.Sigmoid(),
+            nn.Linear(2, 1)
+        )
+
+    def forward(self, data, feat):
+        weight = self.dense(feat)
+        weight = weight.reshape(-1, self.in_features, self.out_features)
+        bias = self.bias(feat).unsqueeze(dim=-1)
+        return torch.bmm(data, weight) + bias
+
+
+class MetaGRUCell(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(MetaGRUCell, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.dense_z = MetaLinear(input_dim, hidden_dim * 2, hidden_dim)
+        self.dense_r = MetaLinear(input_dim, hidden_dim * 2, hidden_dim)
+
+        self.dense_i2h = MetaLinear(input_dim, hidden_dim, hidden_dim)
+        self.dense_h2h = MetaLinear(input_dim, hidden_dim, hidden_dim)
+
+    def forward_once(self, data, features, initial_states=None):
+        num_nodes, batch_size, _ = data.shape
+        if initial_states is None:
+            initial_states = torch.zeros(num_nodes, batch_size, self.hidden_dim,
+                                         dtype=torch.float, device=data.device)
+        prev_state = initial_states
+        data_and_state = torch.cat((data, prev_state), dim=-1)
+        z = torch.sigmoid(self.dense_z(data_and_state, features))
+        r = torch.sigmoid(self.dense_r(data_and_state, features))
+        cur_state = torch.tanh(
+            self.dense_i2h(data, features) +
+            self.dense_h2h(r * prev_state, features)
+        )
+        state = z * prev_state + (1 - z) * cur_state
+        return state
+
+    def forward(self, data, features, initial_states=None):
+        num_nodes, batch_size, length, _ = data.shape
+        data = torch.split(data, 1, dim=2)
+        outputs, state = [], initial_states
+        for input in data:
+            state = self.forward_once(input.squeeze(), features, state)
+            outputs.append(state)
+        outputs = torch.stack(outputs, dim=2)
+        return outputs, state
+
+
 class Encoder(nn.Module):
     def __init__(self, input_dim, hidden_dim):
         super(Encoder, self).__init__()
         self.rnn_layer = nn.GRU(input_dim, hidden_dim, batch_first=True)
         self.meta_gat = MetaGAT(in_channels=hidden_dim * 2, out_channels=hidden_dim)
-        self.meta_rnn = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+        self.meta_rnn = MetaGRUCell(hidden_dim, hidden_dim)
 
     def forward(self, data, features, edge_index):
         """
@@ -93,12 +157,10 @@ class Encoder(nn.Module):
         hiddens = hiddens.squeeze().reshape(num_nodes, batch_size, -1)
         hidden_states.append(hiddens)
 
-        outputs = self.meta_gat(outputs, edge_index, features)
+        outputs = outputs + self.meta_gat(outputs, edge_index, features)
 
-        # shape [num_nodes, batch_size, 1, dim]
-        outputs = outputs.reshape(num_nodes * batch_size, length, -1)
-        outputs, hiddens = self.meta_rnn(outputs)
-        hiddens = hiddens.squeeze().reshape(num_nodes, batch_size, -1)
+        # shape [num_nodes, batch_size, length, dim]
+        outputs, hiddens = self.meta_rnn(outputs, features)
         hidden_states.append(hiddens)
         return hidden_states
 
@@ -110,7 +172,7 @@ class Decoder(nn.Module):
         self.output_dim = output_dim
         self.rnn_layer = nn.GRU(input_dim, hidden_dim, batch_first=True)
         self.meta_gat = MetaGAT(in_channels=hidden_dim * 2, out_channels=hidden_dim)
-        self.meta_rnn = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+        self.meta_rnn = MetaGRUCell(hidden_dim, hidden_dim)
         self.output_layer = nn.Linear(hidden_dim * 2, output_dim)
         self.cl_decay_steps = cl_decay_steps
 
@@ -141,13 +203,11 @@ class Decoder(nn.Module):
             outputs = outputs.reshape(num_nodes, batch_size, 1, -1)
             hidden_embeds[0] = hiddens.squeeze().reshape(num_nodes, batch_size, -1)
 
-            outputs = self.meta_gat(outputs, edge_index, features)
+            outputs = outputs + self.meta_gat(outputs, edge_index, features)
 
-            initial_hidden = hidden_embeds[1].unsqueeze(dim=0).reshape(1, num_nodes * batch_size, -1)
-            outputs = outputs.reshape(num_nodes * batch_size, 1, -1)
-            outputs, hiddens = self.meta_rnn(outputs, initial_hidden)
-            outputs = outputs.reshape(num_nodes, batch_size, 1, -1)
-            hidden_embeds[1] = hiddens.squeeze().reshape(num_nodes, batch_size, -1)
+            initial_hidden = hidden_embeds[1]
+            outputs, hiddens = self.meta_rnn(outputs, features, initial_hidden)
+            hidden_embeds[1] = hiddens
 
             inputs = torch.cat((outputs.squeeze(), features.unsqueeze(dim=1).repeat(1, batch_size, 1)), dim=-1)
             pred = self.output_layer(inputs)

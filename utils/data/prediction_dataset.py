@@ -27,8 +27,8 @@ class PredictDataset(Dataset):
             features,
             mode,
             model_type,
-            train_ratio=0.6,
-            valid_ratio=0.2,
+            train_ratio=0.8,
+            valid_ratio=0.1,
             **kwargs
     ):
         self.data_dir = data_dir
@@ -72,10 +72,10 @@ class PredictDataset(Dataset):
         return cls.model_type
 
     def construct_dataset(self, data, **kwargs):
-        data = self.scaler.transform(data)
         num_time, num_nodes, _ = data.shape
         if PredictDataset.model_type == "STMetaNet":
             mask = np.sum(data, axis=(1, 2)) > 5000
+            data = self.scaler.transform(data)
             timestamps = (np.arange(num_time) % 24) / 24
             timestamps = np.tile(timestamps, (1, num_nodes, 1)).T
             transform_data = np.concatenate((data, timestamps), axis=2)
@@ -94,6 +94,7 @@ class PredictDataset(Dataset):
                 torch.tensor(split_label, dtype=torch.float32)
             )
         else:
+            data = self.scaler.transform(data)
             num_rows, num_cols = kwargs["rows"], kwargs["cols"]
             self.features = self.features.reshape(num_rows, num_cols, -1)
             start_idx = max([
