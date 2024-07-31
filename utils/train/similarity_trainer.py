@@ -51,7 +51,12 @@ class SimilarityTrainer(Trainer):
         loss = (pos_loss + neg_loss).mean()
         return loss
 
-    def train(self, node_feat, edge_index, edge_attr):
+    def train(
+            self,
+            node_feat: Optional[torch.Tensor] = None,
+            edge_index: Optional[torch.Tensor] = None,
+            edge_attr: Optional[torch.Tensor] = None
+    ):
         train_loader = self.get_train_dataloader()
         node_feat, edge_index, edge_attr = (
             node_feat.to(self.device),
@@ -64,7 +69,7 @@ class SimilarityTrainer(Trainer):
             self.model.train()
             for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
                 self.optimizer.zero_grad()
-                if self.train_dataset.model_type == "ST2Vec":
+                if self.train_dataset.model_name == "ST2Vec":
                     a_nodes, a_time, a_len, p_nodes, p_time, p_len, n_nodes, n_time, n_len, pos_dist, neg_dist = batch
                     a_nodes, a_time = a_nodes.to(self.device), a_time.to(self.device)
                     p_nodes, p_time = p_nodes.to(self.device), p_time.to(self.device)
@@ -149,7 +154,7 @@ class SimilarityTrainer(Trainer):
         edge_feat = None if edge_feat is None else edge_feat.to(self.device)
         embeddings, true_dist = [], []
         for batch in tqdm.tqdm(eval_loader, total=len(eval_loader), desc=mode):
-            if self.train_dataset.model_type == "ST2Vec":
+            if self.train_dataset.model_name == "ST2Vec":
                 nodes, time, seq_len, dist = batch
                 nodes, time = nodes.to(self.device), time.to(self.device)
                 batch_embeds = self.model(nodes, time, seq_len, node_feat, edge_index, edge_feat)

@@ -71,7 +71,7 @@ def main():
         configs = json.load(config_file)
         config = configs[model_type]
     feat_dim = config["feat_dim"]
-    ckpt_dir = f"./ckpt/{model_type}-{args.dataset}-{feat_dim}" if args.saved_path is None else args.saved_path
+    ckpt_dir = f"./ckpt/{model_type}-{args.dataset}-{feat_dim}-tu" if args.saved_path is None else args.saved_path
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
 
@@ -91,9 +91,9 @@ def main():
             "period_interval": config["period_interval"],
             "trend_interval": config["trend_interval"]
         }
-    train_dataset = PredictDataset(data_dir, features=features, mode="train", model_type=model_type, **dataset_config)
-    valid_dataset = PredictDataset(data_dir, features=features, mode="valid", model_type=model_type, **dataset_config)
-    test_dataset = PredictDataset(data_dir, features=features, mode="test", model_type=model_type, **dataset_config)
+    train_dataset = PredictDataset(data_dir, features=features, mode="train", model_name=model_type, **dataset_config)
+    valid_dataset = PredictDataset(data_dir, features=features, mode="valid", model_name=model_type, **dataset_config)
+    test_dataset = PredictDataset(data_dir, features=features, mode="test", model_name=model_type, **dataset_config)
 
     if model_type == "STMetaNet":
         model_params = {

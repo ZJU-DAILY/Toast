@@ -3,14 +3,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tqdm
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from typing import Union, Optional
-import matplotlib.pyplot as plt
+from typing import Union, Optional, List
 
-from augment.augment_config import PointUnionConfig
+from augment.augment_config import PointUnionConfig, TaskType
 from utils.train.trainer import Trainer
-from utils.metrics.recovery_metrics import evaluate_point_prediction, evaluate_distance_regression
 
 
 class PointUnion(nn.Module):
@@ -44,22 +42,6 @@ class PointUnion(nn.Module):
     def get_optimizer(self, parameters):
         return AdamW(parameters, lr=self.config.lr)
 
-    @torch.no_grad()
-    def visualize_virtual_embedding(self, axs, batch):
-        if self.config.projection:
-            virtual_embeds = self.transform(self.virtual_embeds.weight).detach()
-        else:
-            virtual_embeds = self.virtual_embeds.weight.detach()
-        # rerank = [0, 3, 4, 8, 10, 11, 12, 13, 16, 18,
-        #           1, 2, 5, 6, 7, 9, 14, 15, 17, 19]
-        # rerank = torch.tensor(rerank, dtype=torch.long, device=self.device)
-        # virtual_embeds = torch.index_select(virtual_embeds, dim=0, index=rerank)
-        cosine_similarity = F.cosine_similarity(virtual_embeds.unsqueeze(1),
-                                                virtual_embeds.unsqueeze(0),
-                                                dim=-1).cpu().numpy()
-        axs.flat[batch // 5].imshow(cosine_similarity, cmap="viridis")
-        axs.flat[batch // 5].set_title("At epoch {}".format(batch + 1))
-
     def append_virtual_embedding(self, inputs, seq_len):
         batch_size = inputs.size(0)
         indices = torch.arange(self.config.num_virtual_tokens, dtype=torch.long, device=self.device)
@@ -77,56 +59,21 @@ class PointUnion(nn.Module):
         outputs = torch.zeros(output_shape, dtype=torch.float, device=self.device)
         for bs in range(batch_size):
             length = seq_len[bs]
+            # length = min(length, inputs.size(1))
             outputs[bs, :length] = inputs[bs, :length]
             outputs[bs, length:length + self.config.num_virtual_tokens] = virtual_inputs[bs]
-        seq_len += self.config.num_virtual_tokens
-        return outputs, seq_len
+        augment_length = seq_len + self.config.num_virtual_tokens
+        return outputs, augment_length
 
-    def virtual_train_mtrajrec(self, dataloader, road_feats, tf_ratio, weights):
+    def train_virtual_embedding(
+            self,
+            dataloader: Optional[DataLoader],
+            road_embeds: Optional[torch.Tensor] = None,
+            road_feats: Optional[torch.Tensor] = None,
+            tf_ratio: float = 0.0,
+            weights: Optional[List[float]] = None
+    ):
         optimizer = self.get_optimizer(self.parameters())
-        for epoch in range(self.config.num_epochs):
-            self.trainer.model.train()
-            for batch in tqdm.tqdm(dataloader, total=len(dataloader), desc=f"train virtual embedding @ {epoch + 1}"):
-                src_grid_seq, src_gps_seq, feat_seq, src_seq_len, \
-                tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, \
-                batched_graph, node_index = batch
-                src_grid_seq, src_gps_seq, feat_seq = src_grid_seq.to(self.device), \
-                                                      src_gps_seq.to(self.device), \
-                                                      feat_seq.to(self.device)
-                tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_inf_scores = tgt_gps_seq.to(self.device), \
-                                                                          tgt_node_seq.to(self.device), \
-                                                                          tgt_rate_seq.to(self.device), \
-                                                                          tgt_inf_scores.to(self.device)
-                optimizer.zero_grad()
-                encoder_embed, hidden_embed = self.trainer.model.encoding(src_grid_seq, src_seq_len, feat_seq)
-                decode_inputs, src_seq_len = self.append_virtual_embedding(
-                    encoder_embed,
-                    src_seq_len
-                )
-                pred_node, pred_rate = self.trainer.model.decoding(
-                    decode_inputs, hidden_embed, road_feats,
-                    src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio
-                )
-                num_pred_node = pred_node.size(2)
-                pred_rate = pred_rate.squeeze(-1)[:, 1:]
-                pred_node = pred_node.permute(1, 0, 2)[1:]
-                pred_node = pred_node.reshape(-1, num_pred_node)  # ((len - 1) * batch_size, node_size)
-                pred_rate = pred_rate.permute(1, 0)  # ((len - 1), batch_size)
-
-                true_node, true_rate = tgt_node_seq.squeeze(-1)[:, 1:], tgt_rate_seq.squeeze(-1)[:, 1:]
-                true_node = true_node.permute(1, 0).reshape(-1)
-                true_rate = true_rate.permute(1, 0)
-                loss = self.trainer.compute_loss(pred_node, pred_rate, None,
-                                                 true_node, true_rate, None,
-                                                 None, tgt_seq_len, weights)
-                loss.backward()
-                optimizer.step()
-            eval_loss = self.virtual_evaluate_mtrajrec(dataloader, road_feats, 0.0, weights)
-            print("eval loss: {:.4f}".format(eval_loss.item()))
-
-    def train_virtual_embedding(self, dataloader, road_embeds, road_feats, tf_ratio, weights):
-        optimizer = self.get_optimizer(self.parameters())
-        fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(9, 6))
         for epoch in range(self.config.num_epochs):
             self.trainer.model.train()
             for batch in tqdm.tqdm(dataloader, total=len(dataloader),
@@ -141,20 +88,35 @@ class PointUnion(nn.Module):
                                                                           tgt_node_seq.to(self.device), \
                                                                           tgt_rate_seq.to(self.device), \
                                                                           tgt_inf_scores.to(self.device)
-                batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
-                traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
 
                 optimizer.zero_grad()
-                encoder_embed, hidden_embed, _ = self.trainer.model.encoding(road_embeds, src_grid_seq, src_seq_len,
-                                                                             feat_seq, node_index, traj_edge,
-                                                                             batched_graph.batch, batched_graph.weight)
-                decode_inputs, src_seq_len = self.append_virtual_embedding(
-                    encoder_embed,
-                    src_seq_len
-                )
-                pred_node, pred_rate = self.trainer.model.decoding(decode_inputs, hidden_embed, road_embeds, road_feats,
-                                                                   src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len,
-                                                                   tgt_inf_scores, tf_ratio)
+                if self.config.model_name == "RNTrajRec":
+                    batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
+                    traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
+                    encoder_embed, hidden_embed, _ = self.trainer.model.encoding(
+                        road_embeds, src_grid_seq, src_seq_len,
+                        feat_seq, node_index, traj_edge,
+                        batched_graph.batch, batched_graph.weight
+                    )
+                    decode_inputs, src_seq_len = self.append_virtual_embedding(
+                        encoder_embed,
+                        src_seq_len
+                    )
+                    pred_node, pred_rate = self.trainer.model.decoding(
+                        decode_inputs, hidden_embed, road_embeds, road_feats,
+                        src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len,
+                        tgt_inf_scores, tf_ratio
+                    )
+                else:
+                    encoder_embed, hidden_embed = self.trainer.model.encoding(src_grid_seq, src_seq_len, feat_seq)
+                    decode_inputs, src_seq_len = self.append_virtual_embedding(
+                        encoder_embed,
+                        src_seq_len
+                    )
+                    pred_node, pred_rate = self.trainer.model.decoding(
+                        decode_inputs, hidden_embed, road_feats,
+                        src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio
+                    )
                 num_pred_node = pred_node.size(2)
                 pred_rate = pred_rate.squeeze(-1)[:, 1:]
                 pred_node = pred_node.permute(1, 0, 2)[1:]
@@ -171,51 +133,16 @@ class PointUnion(nn.Module):
                 optimizer.step()
             eval_loss = self.evaluate_virtual_embedding(dataloader, road_embeds, road_feats, 0.0, weights)
             print("eval loss: {:.4f}".format(eval_loss.item()))
-            if (epoch + 1) % 5 == 0:
-                self.visualize_virtual_embedding(axs, epoch)
-        plt.savefig("./ckpt/virtual_embedding.png", dpi=300)
 
     @torch.no_grad()
-    def virtual_evaluate_mtrajrec(self, dataloader, road_feats, tf_ratio, weights):
-        self.trainer.model.eval()
-        total_loss = .0
-        for batch in tqdm.tqdm(dataloader, total=len(dataloader), desc="evaluate virtual embeddings"):
-            src_grid_seq, src_gps_seq, feat_seq, src_seq_len, \
-            tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, \
-            batched_graph, node_index = batch
-            src_grid_seq, src_gps_seq, feat_seq = src_grid_seq.to(self.device), \
-                                                  src_gps_seq.to(self.device), \
-                                                  feat_seq.to(self.device)
-            tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_inf_scores = tgt_gps_seq.to(self.device), \
-                                                                      tgt_node_seq.to(self.device), \
-                                                                      tgt_rate_seq.to(self.device), \
-                                                                      tgt_inf_scores.to(self.device)
-            encoder_embed, hidden_embed = self.trainer.model.encoding(src_grid_seq, src_seq_len, feat_seq)
-            decode_inputs, src_seq_len = self.append_virtual_embedding(
-                encoder_embed,
-                src_seq_len
-            )
-            pred_node, pred_rate = self.trainer.model.decoding(
-                decode_inputs, hidden_embed, road_feats,
-                src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio
-            )
-            num_pred_node = pred_node.size(2)
-            pred_rate = pred_rate.squeeze(-1)[:, 1:]
-            pred_node = pred_node.permute(1, 0, 2)[1:]
-            pred_node = pred_node.reshape(-1, num_pred_node)  # ((len - 1) * batch_size, node_size)
-            pred_rate = pred_rate.permute(1, 0)  # ((len - 1), batch_size)
-
-            true_node, true_rate = tgt_node_seq.squeeze(-1)[:, 1:], tgt_rate_seq.squeeze(-1)[:, 1:]
-            true_node = true_node.permute(1, 0).reshape(-1)
-            true_rate = true_rate.permute(1, 0)
-            loss = self.trainer.compute_loss(pred_node, pred_rate, None,
-                                             true_node, true_rate, None,
-                                             None, tgt_seq_len, weights)
-            total_loss += loss
-        return total_loss / len(dataloader)
-
-    @torch.no_grad()
-    def evaluate_virtual_embedding(self, dataloader, road_embeds, road_feats, tf_ratio, weights):
+    def evaluate_virtual_embedding(
+            self,
+            dataloader: Optional[DataLoader] = None,
+            road_embeds: Optional[torch.Tensor] = None,
+            road_feats: Optional[torch.Tensor] = None,
+            tf_ratio: float = 0.0,
+            weights: Optional[List[float]] = None
+    ):
         self.trainer.model.eval()
         total_loss = .0
         for batch in tqdm.tqdm(dataloader, total=len(dataloader),
@@ -230,19 +157,35 @@ class PointUnion(nn.Module):
                                                                       tgt_node_seq.to(self.device), \
                                                                       tgt_rate_seq.to(self.device), \
                                                                       tgt_inf_scores.to(self.device)
-            batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
-            traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
 
-            encoder_embed, hidden_embed, _ = self.trainer.model.encoding(road_embeds, src_grid_seq, src_seq_len,
-                                                                         feat_seq, node_index, traj_edge,
-                                                                         batched_graph.batch, batched_graph.weight)
-            decode_inputs, src_seq_len = self.append_virtual_embedding(
-                encoder_embed,
-                src_seq_len
-            )
-            pred_node, pred_rate = self.trainer.model.decoding(decode_inputs, hidden_embed, road_embeds, road_feats,
-                                                               src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len,
-                                                               tgt_inf_scores, tf_ratio)
+            if self.config.model_name == "RNTrajRec":
+                batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
+                traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
+                encoder_embed, hidden_embed, _ = self.trainer.model.encoding(
+                    road_embeds, src_grid_seq, src_seq_len,
+                    feat_seq, node_index, traj_edge,
+                    batched_graph.batch, batched_graph.weight
+                )
+                decode_inputs, src_seq_len = self.append_virtual_embedding(
+                    encoder_embed,
+                    src_seq_len
+                )
+                pred_node, pred_rate = self.trainer.model.decoding(
+                    decode_inputs, hidden_embed, road_embeds, road_feats,
+                    src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len,
+                    tgt_inf_scores, tf_ratio
+                )
+            else:
+                encoder_embed, hidden_embed = self.trainer.model.encoding(src_grid_seq, src_seq_len, feat_seq)
+                decode_inputs, src_seq_len = self.append_virtual_embedding(
+                    encoder_embed,
+                    src_seq_len
+                )
+                pred_node, pred_rate = self.trainer.model.decoding(
+                    decode_inputs, hidden_embed, road_feats,
+                    src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio
+                )
+
             num_pred_node = pred_node.size(2)
             pred_rate = pred_rate.squeeze(-1)[:, 1:]
             pred_node = pred_node.permute(1, 0, 2)[1:]
@@ -258,52 +201,18 @@ class PointUnion(nn.Module):
             total_loss += loss
         return total_loss / len(dataloader)
 
-    def augment_points(self, test_set, model_type, road_net, road_grid, road_len, road_nodes, road_edge, road_batch, road_feat, weight):
-        self.trainer.freeze_model()
-        valid_dataloader = self.trainer.get_eval_dataloader()
-        augment_dataloader = self.trainer.get_test_dataloader(self.augment_dataset)
-        if model_type == "RNTrajRec":
-            road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)
-            road_edge, road_batch = road_edge.long().to(self.device), road_batch.to(self.device)
-            road_feat = road_feat.to(self.device)
-            road_embed = self.trainer.model.extract_feat(road_grid, road_len, road_nodes, road_edge, road_batch)
-
-            self.train_virtual_embedding(valid_dataloader, road_embed, road_feat, 0.0, weight)
-            results = self.evaluate_virtual_embedding(
-                test_set, road_net, road_grid, road_len, road_nodes, road_edge, road_batch, road_feat
-            )
-        else:
-            road_feat = road_feat.to(self.device)
-            self.virtual_train_mtrajrec(valid_dataloader, road_feat, 0.0, weight)
-            results = self.evaluate_augment_mtrajrec(test_set, road_net, road_feat)
-        return results
-        # with torch.no_grad():
-        #     if self.config.projection:
-        #         self.virtual_embeds = self.transform(self.virtual_embeds).detach()
-        #
-        #     for batch in augment_dataloader:
-        #         src_grid_seq, src_gps_seq, feat_seq, src_seq_len, \
-        #         tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, \
-        #         batched_graph, node_index = batch
-        #         src_grid_seq, src_gps_seq, feat_seq = src_grid_seq.to(self.device), \
-        #                                               src_gps_seq.to(self.device), \
-        #                                               feat_seq.to(self.device)
-        #         tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_inf_scores = tgt_gps_seq.to(self.device), \
-        #                                                                   tgt_node_seq.to(self.device), \
-        #                                                                   tgt_rate_seq.to(self.device), \
-        #                                                                   tgt_inf_scores.to(self.device)
-        #         batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
-        #         traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
-        #
-        #         point_embed, _, _ = self.trainer.model.encoding(road_embed, src_grid_seq, src_seq_len, feat_seq,
-        #                                                         node_index, traj_edge, batched_graph.batch,
-        #                                                         batched_graph.weight)
-        #         self.point_index.add(point_embed)
-        # augment_embeds, _ = self.point_index.search(self.virtual_embeds, self.config.num_virtual_tokens)
-        # return augment_embeds
-
     @torch.no_grad()
-    def evaluate_augment(self, test_set, road_net, road_grid, road_len, road_nodes, road_edge, road_batch, road_feats):
+    def evaluate_recovery_augment(
+            self,
+            test_set,
+            road_net=None,
+            road_grid=None,
+            road_len=None,
+            road_nodes=None,
+            road_edge=None,
+            road_batch=None,
+            road_feats=None
+    ):
         self.trainer.model.eval()
         test_loader = self.trainer.get_test_dataloader(test_set)
         road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)
@@ -323,31 +232,47 @@ class PointUnion(nn.Module):
                                                                       tgt_node_seq.to(self.device), \
                                                                       tgt_rate_seq.to(self.device), \
                                                                       tgt_inf_scores.to(self.device)
-            batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
-            traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
-            encoder_embed, hidden_embed, _ = self.trainer.model.encoding(road_embeds, src_grid_seq, src_seq_len,
-                                                                         feat_seq, node_index, traj_edge,
-                                                                         batched_graph.batch, batched_graph.weight)
-            decode_inputs, src_seq_len = self.append_virtual_embedding(
-                encoder_embed,
-                src_seq_len
-            )
-            pred_node, pred_rate = self.trainer.model.decoding(decode_inputs, hidden_embed, road_embeds, road_feats,
-                                                               src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len,
-                                                               tgt_inf_scores, .0)
+
+            if self.config.model_name == "RNTrajRec":
+                batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
+                traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
+                encoder_embed, hidden_embed, _ = self.trainer.model.encoding(
+                    road_embeds, src_grid_seq, src_seq_len,
+                    feat_seq, node_index, traj_edge,
+                    batched_graph.batch, batched_graph.weight
+                )
+                decode_inputs, src_seq_len = self.append_virtual_embedding(
+                    encoder_embed,
+                    src_seq_len
+                )
+                pred_node, pred_rate = self.trainer.model.decoding(
+                    decode_inputs, hidden_embed, road_embeds, road_feats,
+                    src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len,
+                    tgt_inf_scores, 0.0
+                )
+            else:
+                encoder_embed, hidden_embed = self.trainer.model.encoding(src_grid_seq, src_seq_len, feat_seq)
+                decode_inputs, src_seq_len = self.append_virtual_embedding(
+                    encoder_embed,
+                    src_seq_len
+                )
+                pred_node, pred_rate = self.trainer.model.decoding(
+                    decode_inputs, hidden_embed, road_feats,
+                    src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, 0.0
+                )
+
             pred_rate = pred_rate.squeeze(-1)
             tgt_node_seq, tgt_rate_seq = tgt_node_seq.squeeze(-1), tgt_rate_seq.squeeze(-1)
             pred_node, pred_rate = pred_node[:, 1:, :], pred_rate[:, 1:]
             tgt_node_seq, tgt_rate_seq = tgt_node_seq[:, 1:], tgt_rate_seq[:, 1:]
-
-            acc, prec, recall, f1 = evaluate_point_prediction(pred_node,
-                                                              tgt_node_seq,
-                                                              tgt_seq_len - 1)
-            mae, rmse = evaluate_distance_regression(pred_node,
-                                                     pred_rate,
-                                                     tgt_gps_seq[:, 1:, :],
-                                                     tgt_seq_len - 1,
-                                                     road_net)
+            acc, prec, recall, f1, mae, rmse = self.trainer.compute_metrics(
+                pred_node,
+                pred_rate,
+                tgt_node_seq,
+                tgt_gps_seq[:, 1:, :],
+                tgt_seq_len - 1,
+                road_net
+            )
             total_acc += acc
             total_prec += prec
             total_recall += recall
@@ -356,53 +281,237 @@ class PointUnion(nn.Module):
             total_rmse += rmse
         return np.mean(total_acc), np.mean(total_prec), np.mean(total_recall), \
                np.mean(total_f1), np.mean(total_mae), np.mean(total_rmse)
+
+    def train_similarity_virtual_embeddings(
+            self,
+            dataloader: Optional[DataLoader],
+            node_feat: Optional[torch.Tensor] = None,
+            edge_index: Optional[torch.Tensor] = None,
+            edge_attr: Optional[torch.Tensor] = None
+    ):
+        optimizer = self.get_optimizer(self.parameters())
+        for epoch in range(self.config.num_epochs):
+            self.trainer.model.train()
+            for batch in tqdm.tqdm(dataloader, total=len(dataloader),
+                                   desc="train virtual embeddings @ {}".format(epoch + 1)):
+                optimizer.zero_grad()
+                if self.config.model_name == "ST2Vec":
+                    a_nodes, a_time, a_len, p_nodes, p_time, p_len, n_nodes, n_time, n_len, pos_dist, neg_dist = batch
+                    a_nodes, a_time = a_nodes.to(self.device), a_time.to(self.device)
+                    p_nodes, p_time = p_nodes.to(self.device), p_time.to(self.device)
+                    n_nodes, n_time = n_nodes.to(self.device), n_time.to(self.device)
+                    pos_dist, neg_dist = pos_dist.to(self.device), neg_dist.to(self.device)
+                    spatial_embeds, time_embeds = self.trainer.model.extract_feat(
+                        a_nodes, a_time, a_len, node_feat, edge_index, edge_attr
+                    )
+                    suffix_spatial_embeds, augment_lengths = self.append_virtual_embedding(
+                        spatial_embeds, a_len
+                    )
+                    suffix_temporal_embeds, _ = self.append_virtual_embedding(
+                        time_embeds, a_len
+                    )
+                    a_embeds = self.trainer.model.encoding(
+                        suffix_spatial_embeds,
+                        suffix_temporal_embeds,
+                        augment_lengths
+                    )
+                    p_embeds = self.trainer.model(p_nodes, p_time, p_len, node_feat, edge_index, edge_attr)
+                    n_embeds = self.trainer.model(n_nodes, n_time, n_len, node_feat, edge_index, edge_attr)
+                else:
+                    a_nodes, _, a_len, p_nodes, _, p_len, n_nodes, _, n_len, pos_dist, neg_dist = batch
+                    a_nodes, p_nodes, n_nodes = a_nodes.to(self.device), p_nodes.to(self.device), n_nodes.to(self.device)
+                    pos_dist, neg_dist = pos_dist.to(self.device), neg_dist.to(self.device)
+                    spatial_embeds = self.trainer.model.extract_feat(
+                        a_nodes, a_len, node_feat, edge_index, edge_attr
+                    )
+                    suffix_spatial_embeds, augment_lengths = self.append_virtual_embedding(
+                        spatial_embeds, a_len
+                    )
+                    a_embeds = self.trainer.model.encoding(
+                        suffix_spatial_embeds,
+                        augment_lengths
+                    )
+                    p_embeds = self.model(p_nodes, p_len, node_feat, edge_index, edge_attr)
+                    n_embeds = self.model(n_nodes, n_len, node_feat, edge_index, edge_attr)
+                loss = self.trainer.compute_loss(a_embeds, p_embeds, n_embeds, pos_dist, neg_dist)
+                loss.backward()
+                optimizer.step()
 
     @torch.no_grad()
-    def evaluate_augment_mtrajrec(self, test_set, road_net, road_feats):
+    def evaluate_similarity_virtual_embeddings(
+            self,
+            dataloader: DataLoader,
+            node_feat=None,
+            edge_index=None,
+            edge_attr=None
+    ):
+        self.trainer.model.eval()
+        embeddings, true_dist = [], []
+        for batch in tqdm.tqdm(dataloader, total=len(dataloader),
+                               desc="evaluate virtual embeddings"):
+            if self.config.model_name == "ST2Vec":
+                nodes, time, seq_len, dist = batch
+                nodes, time = nodes.to(self.device), time.to(self.device)
+                spatial_embeds, time_embeds = self.trainer.model.extract_feat(
+                    nodes, time, seq_len, node_feat, edge_index, edge_attr
+                )
+                suffix_spatial_embeds, augment_lengths = self.append_virtual_embedding(
+                    spatial_embeds, seq_len
+                )
+                suffix_temporal_embeds, _ = self.append_virtual_embedding(
+                    time_embeds, seq_len
+                )
+                batch_embeds = self.trainer.model.encoding(
+                    suffix_spatial_embeds,
+                    suffix_temporal_embeds,
+                    augment_lengths
+                )
+            else:
+                nodes, _, seq_len, dist = batch
+                nodes = nodes.to(self.device)
+                spatial_embeds = self.trainer.model.extract_feat(
+                    nodes, seq_len, node_feat, edge_index, edge_attr
+                )
+                suffix_spatial_embeds, augment_lengths = self.append_virtual_embedding(
+                    spatial_embeds, seq_len
+                )
+                batch_embeds = self.trainer.model.encoding(
+                    suffix_spatial_embeds, augment_lengths
+                )
+            embeddings.append(batch_embeds)
+            true_dist.append(dist)
+        embeddings = torch.cat(embeddings, dim=0)
+        true_dist = torch.cat(true_dist, dim=0)
+        hr10, hr50, hr10_50 = self.trainer.compute_metrics(embeddings.cpu().numpy(), true_dist[:5000].numpy())
+        return hr10, hr50, hr10_50
+
+    @torch.no_grad()
+    def evaluate_similarity_augment(
+            self,
+            test_set,
+            node_feat=None,
+            edge_index=None,
+            edge_attr=None
+    ):
         self.trainer.model.eval()
         test_loader = self.trainer.get_test_dataloader(test_set)
-        road_feats = road_feats.to(self.device)
+        embeddings, true_dist = [], []
+        for batch in tqdm.tqdm(test_loader, total=len(test_loader),
+                               desc="evaluate virtual embeddings"):
+            if self.config.model_name == "ST2Vec":
+                nodes, time, seq_len, dist = batch
+                nodes, time = nodes.to(self.device), time.to(self.device)
+                spatial_embeds, time_embeds = self.trainer.model.extract_feat(
+                    nodes, time, seq_len, node_feat, edge_index, edge_attr
+                )
+                suffix_spatial_embeds, augment_lengths = self.append_virtual_embedding(
+                    spatial_embeds, seq_len
+                )
+                suffix_temporal_embeds, _ = self.append_virtual_embedding(
+                    time_embeds, seq_len
+                )
+                batch_embeds = self.trainer.model.encoding(
+                    suffix_spatial_embeds,
+                    suffix_temporal_embeds,
+                    augment_lengths
+                )
+            else:
+                nodes, _, seq_len, dist = batch
+                nodes = nodes.to(self.device)
+                spatial_embeds = self.trainer.model.extract_feat(
+                    nodes, seq_len, node_feat, edge_index, edge_attr
+                )
+                suffix_spatial_embeds, augment_lengths = self.append_virtual_embedding(
+                    spatial_embeds, seq_len
+                )
+                batch_embeds = self.trainer.model.encoding(
+                    suffix_spatial_embeds, augment_lengths
+                )
+            embeddings.append(batch_embeds)
+            true_dist.append(dist)
+        embeddings = torch.cat(embeddings, dim=0)
+        true_dist = torch.cat(true_dist, dim=0)
+        hr10, hr50, hr10_50 = self.trainer.compute_metrics(embeddings.cpu().numpy(), true_dist[:5000].numpy())
+        return hr10, hr50, hr10_50
 
-        total_acc, total_prec, total_recall, total_f1, total_mae, total_rmse, total_loss = [], [], [], [], [], [], .0
-        for batch in tqdm.tqdm(test_loader, total=len(test_loader), desc="test augmentation"):
-            src_grid_seq, src_gps_seq, feat_seq, src_seq_len, \
-            tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, \
-            batched_graph, node_index = batch
-            src_grid_seq, src_gps_seq, feat_seq = src_grid_seq.to(self.device), \
-                                                  src_gps_seq.to(self.device), \
-                                                  feat_seq.to(self.device)
-            tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_inf_scores = tgt_gps_seq.to(self.device), \
-                                                                      tgt_node_seq.to(self.device), \
-                                                                      tgt_rate_seq.to(self.device), \
-                                                                      tgt_inf_scores.to(self.device)
+    def check_kwargs(self, kwargs):
+        if self.config.model_name == "RNTrajRec":
+            return "road_grid" in kwargs
+        elif self.config.model_name == "MTrajRec":
+            return "road_feat" in kwargs
+        else:
+            return "edge_index" in kwargs
 
-            encoder_embed, hidden_embed = self.trainer.model.encoding(src_grid_seq, src_seq_len, feat_seq)
-            decode_inputs, src_seq_len = self.append_virtual_embedding(
-                encoder_embed,
-                src_seq_len
+    def augment_points(
+            self,
+            test_set,
+            **kwargs
+    ):
+        self.trainer.freeze_model()
+        if self.config.task_type == TaskType.TRAJ_RECOVERY:
+            valid_dataloader = self.trainer.get_eval_dataloader()
+            augment_dataloader = self.trainer.get_test_dataloader(self.augment_dataset)
+            if self.config.model_name == "RNTrajRec" and self.check_kwargs(kwargs):
+                road_net, road_grid, road_len, road_nodes, road_edge, road_batch, road_feat, weight = (
+                    kwargs["road_net"], kwargs["road_grid"],
+                    kwargs["road_len"], kwargs["road_nodes"],
+                    kwargs["road_edge"], kwargs["road_batch"],
+                    kwargs["road_feat"], kwargs["weights"]
+                )
+                road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)
+                road_edge, road_batch = road_edge.long().to(self.device), road_batch.to(self.device)
+                road_feat = road_feat.to(self.device)
+                road_embed = self.trainer.model.extract_feat(road_grid, road_len, road_nodes, road_edge, road_batch)
+                self.train_virtual_embedding(
+                    dataloader=valid_dataloader,
+                    road_embeds=road_embed,
+                    road_feats=road_feat,
+                    tf_ratio=0.0,
+                    weights=weight
+                )
+                results = self.evaluate_recovery_augment(
+                    test_set,
+                    road_net,
+                    road_grid,
+                    road_len,
+                    road_nodes,
+                    road_edge,
+                    road_batch,
+                    road_feat
+                )
+            elif self.check_kwargs(kwargs):
+                road_net, road_feat, weight = kwargs["road_net"], kwargs["road_feat"], kwargs["weights"]
+                road_feat = road_feat.to(self.device)
+                self.train_virtual_embedding(
+                    valid_dataloader,
+                    road_feats=road_feat,
+                    tf_ratio=0.0,
+                    weights=weight
+                )
+                results = self.evaluate_recovery_augment(
+                    test_set,
+                    road_net=road_net,
+                    road_feats=road_feat
+                )
+        elif self.config.task_type == TaskType.TRAJ_SIMILAR and self.check_kwargs(kwargs):
+            train_dataloader = self.trainer.get_train_dataloader()
+            augment_dataloader = self.trainer.get_test_dataloader(self.augment_dataset)
+            node_feat, edge_index, edge_attr = kwargs["node_feat"], kwargs["edge_index"], kwargs["edge_attr"]
+            node_feat, edge_index, edge_attr = (
+                node_feat.to(self.device),
+                edge_index.to(self.device),
+                edge_attr.to(self.device)
             )
-            pred_node, pred_rate = self.trainer.model.decoding(
-                decode_inputs, hidden_embed, road_feats,
-                src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, 0
+            self.train_similarity_virtual_embeddings(
+                train_dataloader,
+                node_feat=node_feat,
+                edge_index=edge_index,
+                edge_attr=edge_attr
             )
-            pred_rate = pred_rate.squeeze(-1)
-            tgt_node_seq, tgt_rate_seq = tgt_node_seq.squeeze(-1), tgt_rate_seq.squeeze(-1)
-            pred_node, pred_rate = pred_node[:, 1:, :], pred_rate[:, 1:]
-            tgt_node_seq, tgt_rate_seq = tgt_node_seq[:, 1:], tgt_rate_seq[:, 1:]
-
-            acc, prec, recall, f1 = evaluate_point_prediction(pred_node,
-                                                              tgt_node_seq,
-                                                              tgt_seq_len - 1)
-            mae, rmse = evaluate_distance_regression(pred_node,
-                                                     pred_rate,
-                                                     tgt_gps_seq[:, 1:, :],
-                                                     tgt_seq_len - 1,
-                                                     road_net)
-            total_acc += acc
-            total_prec += prec
-            total_recall += recall
-            total_f1 += f1
-            total_mae += mae
-            total_rmse += rmse
-        return np.mean(total_acc), np.mean(total_prec), np.mean(total_recall), \
-               np.mean(total_f1), np.mean(total_mae), np.mean(total_rmse)
+            results = self.evaluate_similarity_augment(
+                test_set,
+                node_feat=node_feat,
+                edge_index=edge_index,
+                edge_attr=edge_attr
+            )
+        return results

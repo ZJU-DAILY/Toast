@@ -4,15 +4,17 @@ from trak.projectors import ProjectionType
 
 
 class TaskType(str, enum.Enum):
-    TRAJ_REC = "TRAJ_REC"
-    TRAJ_SIM = "TRAJ_SIM"
-    TRANS_TYPE = "TRANS_TYPE"
+    TRAJ_RECOVERY = "trajectory_recovery"
+    TRAJ_SIMILAR = "trajectory_similarity"
+    TYPE_IDENTIFY = "transport_type_identification"
+    FLOW_PREDICT = "traffic_flow_prediction"
 
 
 class PointUnionConfig:
     def __init__(
             self,
             task_type: Optional[TaskType],
+            model_name: str,
             num_virtual_tokens: int = 5,
             virtual_dim: int = 512,
             num_epochs: int = 10,
@@ -21,6 +23,7 @@ class PointUnionConfig:
             project_hidden_dim: int = 256
     ):
         self.task_type = task_type
+        self.model_name = model_name
         self.num_virtual_tokens = num_virtual_tokens
         self.virtual_dim = virtual_dim
         self.num_epochs = num_epochs
@@ -34,6 +37,7 @@ class TrajUnionConfig:
     def __init__(
             self,
             task_type: Optional[TaskType],
+            model_name: str,
             num_augments,
             proj_type=ProjectionType.rademacher,
             proj_dim=8192,
@@ -42,6 +46,7 @@ class TrajUnionConfig:
             eps=1e-8
     ):
         self.task_type = task_type
+        self.model_name = model_name
         self.num_augments = num_augments
         self.proj_type = proj_type
         self.proj_dim = proj_dim
@@ -53,7 +58,9 @@ class TrajUnionConfig:
 class AttrJoinConfig:
     def __init__(
             self,
-            task_type: Optional[TaskType]
+            task_type: Optional[TaskType],
+            model_name: str
     ):
         self.task_type = task_type
+        self.model_name = model_name
         pass

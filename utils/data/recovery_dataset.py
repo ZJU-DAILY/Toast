@@ -17,10 +17,12 @@ from utils.parser.parser import ParseMMTraj
 
 
 class RecoveryDataset(Dataset):
-    def __init__(self, traj_dir, road_net, region, mode, model_type, time_interval, win_size, grid_size, ds_type, keep_ratio, neighbor_dist, search_dist, beta, gamma):
+    model_name = None
+
+    def __init__(self, traj_dir, road_net, region, mode, model_name, time_interval, win_size, grid_size, ds_type, keep_ratio, neighbor_dist, search_dist, beta, gamma):
         self.road_net = road_net
         self.mode = mode
-        self.model_type = model_type
+        RecoveryDataset.model_name = model_name
         self.region = region
         self.time_interval = time_interval
         self.neighbor_dist = neighbor_dist
@@ -50,7 +52,7 @@ class RecoveryDataset(Dataset):
         tgt_len = torch.tensor([len(tgt_gps_seq)])
 
         src_influence, tgt_influence = self.get_influence_matrix(src_grid_seq, src_gps_seq, src_len, tgt_len)
-        if self.model_type == "MTrajRec":
+        if self.model_name == "MTrajRec":
             return src_grid_seq, src_gps_seq, src_feat, tgt_gps_seq, tgt_rid, tgt_rate, tgt_influence, None, None
         else:
             src_subgraphs, node_index = self.build_subgraph(src_influence, src_grid_seq, tgt_rid)

@@ -11,12 +11,14 @@ from torch_geometric.nn import Node2Vec
 from utils.data import SimilarityDataset
 from utils.train import SimilarityTrainer
 from models.similarity_model import ST2Vec, GTS
+from augment.augment_config import PointUnionConfig, TaskType
+from augment.point_union import PointUnion
 
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="traffic flow prediction")
     parser.add_argument("--dataset", type=str, default="tdrive")
-    parser.add_argument("--model_type", type=str, default="ST2Vec")
+    parser.add_argument("--model_name", type=str, default="ST2Vec")
     parser.add_argument("--gt_file", type=str, default="ground_truth")
     parser.add_argument("--num_epochs", type=int, default=150, help="epochs")
     parser.add_argument("--batch_size", type=int, default=128, help="batch size")
@@ -94,22 +96,22 @@ def main():
     device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
     data_dir = os.path.join("./data", args.dataset)
     gt_dir = os.path.join(data_dir, args.gt_file)
-    model_type = args.model_type
+    model_name = args.model_name
     phase = args.phase
     with open("configs/similarity_config.json", 'r') as config_file:
         configs = json.load(config_file)
-        config = configs[model_type]
-    ckpt_dir = f"./ckpt/{model_type}-{args.dataset}" if args.saved_path is None else args.saved_path
+        config = configs[model_name]
+    ckpt_dir = f"./ckpt/{model_name}-{args.dataset}" if args.saved_path is None else args.saved_path
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
 
     edge_index, node_feats, edge_attr = get_graph_features(data_dir, config["spatial_dim"], device)
 
-    train_dataset = SimilarityDataset(data_dir, gt_dir, mode="train", model_type=model_type)
-    valid_dataset = SimilarityDataset(data_dir, gt_dir, mode="valid", model_type=model_type)
-    test_dataset = SimilarityDataset(data_dir, gt_dir, mode="test", model_type=model_type)
+    train_dataset = SimilarityDataset(data_dir, gt_dir, mode="train", model_name=model_name)
+    valid_dataset = SimilarityDataset(data_dir, gt_dir, mode="valid", model_name=model_name)
+    test_dataset = SimilarityDataset(data_dir, gt_dir, mode="test", model_name=model_name)
 
-    if model_type == "ST2Vec":
+    if model_name == "ST2Vec":
         model_params = {
             "spatial_dim": config["spatial_dim"],
             "temporal_dim": config["temporal_dim"],
@@ -155,6 +157,26 @@ def main():
               .format(metric_result[0],
                       metric_result[1],
                       metric_result[2]))
+    if (phase is None) or (phase == "augment"):
+        trainer.load_model()
+        augment_config = PointUnionConfig(
+            TaskType.TRAJ_SIMILAR,
+            model_name=model_name,
+            virtual_dim=config["feature_dim"],
+            num_virtual_tokens=20,
+            num_epochs=args.num_epochs
+        )
+        augmentor = PointUnion(augment_config, trainer, None, device)
+        augment_result = augmentor.augment_points(
+            test_dataset,
+            node_feat=node_feats,
+            edge_index=edge_index,
+            edge_attr=edge_attr
+        )
+        print("hr10: {:.4f}\thr50: {:.4f}\thr10_50: {:.4f}\n"
+              .format(augment_result[0],
+                      augment_result[1],
+                      augment_result[2]))
 
 
 if __name__ == "__main__":

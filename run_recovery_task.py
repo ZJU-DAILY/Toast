@@ -17,7 +17,7 @@ from augment.point_union import PointUnion
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="trajectory recovery")
     parser.add_argument("--dataset", type=str, default="Shanghai")
-    parser.add_argument("--model_type", type=str, default="RNTrajRec")
+    parser.add_argument("--model_name", type=str, default="RNTrajRec")
     parser.add_argument("--num_epochs", type=int, default=30, help="epochs")
     parser.add_argument("--batch_size", type=int, default=64, help="batch size")
     parser.add_argument("--phase", type=str, default=None, help="select from `train`, `test`, `augment`")
@@ -58,13 +58,13 @@ def main():
     file_name = "edgeOSM.txt"
     type_path = "wayTypeOSM.txt"
     zone_range = [41.111975, -8.667057, 41.177462, -8.585305]
-    model_type = args.model_type
-    ckpt_dir = f"./ckpt/{model_type}-" + args.dataset if args.saved_path is None else args.saved_path
+    model_name = args.model_name
+    ckpt_dir = f"./ckpt/{model_name}-" + args.dataset if args.saved_path is None else args.saved_path
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
     with open("configs/recovery_config.json", 'r') as config_file:
         configs = json.load(config_file)
-        config = configs[model_type]
+        config = configs[model_name]
 
     road_net = SegmentCentricRoadNetwork(road_dir, file_name, zone_range)
     road_net.read_roadnet()
@@ -83,11 +83,11 @@ def main():
                       "search_dist": config["search_dist"],
                       "beta": config["beta"],
                       "gamma": config["gamma"]}
-    train_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "train", model_type, **dataset_params)
-    valid_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "valid", model_type, **dataset_params)
-    test_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "test", model_type, **dataset_params)
+    train_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "train", model_name, **dataset_params)
+    valid_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "valid", model_name, **dataset_params)
+    test_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "test", model_name, **dataset_params)
 
-    if model_type == "RNTrajRec":
+    if model_name == "RNTrajRec":
         model_params = {"hidden_dim": config["hidden_dim"],
                         "num_gnn_layers": config["num_gnn_layers"],
                         "num_encoder_layers": config["num_encoder_layers"],
@@ -122,23 +122,46 @@ def main():
                               pin_memory=True,
                               device=device)
     if (phase is None) or (phase == "train"):
-        if model_type == "RNTrajRec":
-            trainer.train(road_grid, road_len, road_node_index, subgraph.edge_index, subgraph.batch,
-                          road_feat, road_net, [config["lambda1"], config["lambda2"]], config["decay_ratio"], config["tf_ratio"])
-            metric_result = trainer.evaluate(test_dataset, road_grid, road_len, road_node_index,
-                                             subgraph.edge_index, subgraph.batch, road_feat, .0, road_net,
-                                             [config["lambda1"], config["lambda2"]])
+        if model_name == "RNTrajRec":
+            trainer.train(
+                road_grid=road_grid,
+                road_len=road_len,
+                road_nodes=road_node_index,
+                road_edge=subgraph.edge_index,
+                road_batch=subgraph.batch,
+                road_feat=road_feat,
+                road_net=road_net,
+                weights=[config["lambda1"], config["lambda2"]],
+                decay_param=config["decay_ratio"],
+                tf_ratio=config["tf_ratio"]
+            )
+            metric_result = trainer.evaluate(
+                test_dataset=test_dataset,
+                road_grid=road_grid,
+                road_len=road_len,
+                road_nodes=road_node_index,
+                road_edge=subgraph.edge_index,
+                road_batch=subgraph.batch,
+                road_feat=road_feat,
+                tf_ratio=.0,
+                road_net=road_net,
+                weights=[config["lambda1"], config["lambda2"]]
+            )
         else:
-            trainer.train_mtrajrec(
-                road_net, road_feat,
-                [config["lambda1"], config["lambda2"]],
-                config["decay_ratio"], config["tf_ratio"]
+            trainer.train(
+                road_net=road_net,
+                road_feat=road_feat,
+                weights=[config["lambda1"], config["lambda2"]],
+                decay_param=config["decay_ratio"],
+                tf_ratio=.0
             )
-            metric_result = trainer.evaluate_mtrajrec(
-                test_dataset, road_feat, .0, road_net,
-                [config["lambda1"], config["lambda2"]]
+            metric_result = trainer.evaluate(
+                test_dataset=test_dataset,
+                road_feat=road_feat,
+                tf_ratio=.0,
+                road_net=road_net,
+                weights=[config["lambda1"], config["lambda2"]]
             )
-
         print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
               .format(metric_result[0],
                       metric_result[1],
@@ -148,16 +171,27 @@ def main():
                       metric_result[5]))
     if (phase is None) or (phase == "test"):
         trainer.load_model()
-        if model_type == "RNTrajRec":
-            metric_result = trainer.evaluate(test_dataset, road_grid, road_len, road_node_index,
-                                             subgraph.edge_index, subgraph.batch, road_feat, .0, road_net,
-                                             [config["lambda1"], config["lambda2"]])
-        else:
-            metric_result = trainer.evaluate_mtrajrec(
-                test_dataset, road_feat, .0, road_net,
-                [config["lambda1"], config["lambda2"]]
+        if model_name == "RNTrajRec":
+            metric_result = trainer.evaluate(
+                test_dataset=test_dataset,
+                road_grid=road_grid,
+                road_len=road_len,
+                road_nodes=road_node_index,
+                road_edge=subgraph.edge_index,
+                road_batch=subgraph.batch,
+                road_feat=road_feat,
+                tf_ratio=.0,
+                road_net=road_net,
+                weights=[config["lambda1"], config["lambda2"]]
             )
-
+        else:
+            metric_result = trainer.evaluate(
+                test_dataset=test_dataset,
+                road_feat=road_feat,
+                tf_ratio=.0,
+                road_net=road_net,
+                weights=[config["lambda1"], config["lambda2"]]
+            )
         print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
               .format(metric_result[0],
                       metric_result[1],
@@ -168,30 +202,45 @@ def main():
     if (phase is None) or (phase == "augment"):
         trainer.load_model()
         augment_config = PointUnionConfig(
-            TaskType["TRAJ_REC"],
+            TaskType.TRAJ_RECOVERY,
+            model_name=model_name,
             num_virtual_tokens=20,
             num_epochs=args.num_epochs
         )
         augmentor = PointUnion(augment_config, trainer, None, device)
-        augment_result = augmentor.augment_points(
-            test_dataset,
-            model_type,
-            road_net,
-            road_grid,
-            road_len,
-            road_node_index,
-            subgraph.edge_index,
-            subgraph.batch,
-            road_feat,
-            [config["lambda1"], config["lambda2"]]
-        )
-        print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
-              .format(augment_result[0],
-                      augment_result[1],
-                      augment_result[2],
-                      augment_result[3],
-                      augment_result[4],
-                      augment_result[5]))
+        if model_name == "RNTrajRec":
+            augment_result = augmentor.augment_points(
+                test_dataset,
+                road_net=road_net,
+                road_grid=road_grid,
+                road_len=road_len,
+                road_nodes=road_node_index,
+                road_edge=subgraph.edge_index,
+                road_batch=subgraph.batch,
+                road_feat=road_feat,
+                weights=[config["lambda1"], config["lambda2"]]
+            )
+            print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
+                  .format(augment_result[0],
+                          augment_result[1],
+                          augment_result[2],
+                          augment_result[3],
+                          augment_result[4],
+                          augment_result[5]))
+        else:
+            augment_result = augmentor.augment_points(
+                test_dataset,
+                road_net=road_net,
+                road_feat=road_feat,
+                weights=[config["lambda1"], config["lambda2"]]
+            )
+            print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
+                  .format(augment_result[0],
+                          augment_result[1],
+                          augment_result[2],
+                          augment_result[3],
+                          augment_result[4],
+                          augment_result[5]))
 
 
 if __name__ == "__main__":

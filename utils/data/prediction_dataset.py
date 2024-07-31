@@ -18,7 +18,7 @@ class Scaler:
 
 
 class PredictDataset(Dataset):
-    model_type = None
+    model_name = None
     scaler = None
 
     def __init__(
@@ -26,7 +26,7 @@ class PredictDataset(Dataset):
             data_dir,
             features,
             mode,
-            model_type,
+            model_name,
             train_ratio=0.8,
             valid_ratio=0.1,
             **kwargs
@@ -34,10 +34,10 @@ class PredictDataset(Dataset):
         self.data_dir = data_dir
         self.features = torch.tensor(features)
         self.mode = mode
-        PredictDataset.model_type = model_type
+        PredictDataset.model_name = model_name
         self.train_ratio = train_ratio
         self.valid_ratio = valid_ratio
-        if model_type == "STMetaNet":
+        if model_name == "STMetaNet":
             self.input_len = kwargs["input_len"]
             self.output_len = kwargs["output_len"]
             self.flow_data, self.labels = self.process(data_dir, "data")
@@ -50,13 +50,13 @@ class PredictDataset(Dataset):
             self.close_data, self.period_data, self.trend_data, self.labels = self.process(data_dir, "data")
 
     def __len__(self):
-        if PredictDataset.model_type == "STMetaNet":
+        if PredictDataset.model_name == "STMetaNet":
             return self.flow_data.shape[0]
         else:
             return self.close_data.shape[0]
 
     def __getitem__(self, item):
-        if PredictDataset.model_type == "STMetaNet":
+        if PredictDataset.model_name == "STMetaNet":
             return self.flow_data[item], self.features, self.labels[item]
         else:
             return (
@@ -68,12 +68,12 @@ class PredictDataset(Dataset):
             )
 
     @classmethod
-    def get_model_type(cls):
-        return cls.model_type
+    def get_model_name(cls):
+        return cls.model_name
 
     def construct_dataset(self, data, **kwargs):
         num_time, num_nodes, _ = data.shape
-        if PredictDataset.model_type == "STMetaNet":
+        if PredictDataset.model_name == "STMetaNet":
             mask = np.sum(data, axis=(1, 2)) > 5000
             data = self.scaler.transform(data)
             timestamps = (np.arange(num_time) % 24) / 24
@@ -142,6 +142,7 @@ class PredictDataset(Dataset):
         valid_size = int(data_size * self.valid_ratio)
         test_size = data_size - train_size - valid_size
         if self.mode == "train":
+            flow_data[:train_size] += 2
             PredictDataset.scaler = Scaler(flow_data[:train_size])
             return self.construct_dataset(flow_data[:train_size], rows=rows, cols=cols)
         elif self.mode == "valid":
@@ -153,7 +154,7 @@ class PredictDataset(Dataset):
     def collate_fn(batch):
         def collate_batch(idx):
             return [sample[idx] for sample in batch]
-        if PredictDataset.model_type == "STMetaNet":
+        if PredictDataset.model_name == "STMetaNet":
             batch_data = torch.stack(collate_batch(0), dim=0)
             batch_feat = torch.stack(collate_batch(1), dim=0)
             batch_label = torch.stack(collate_batch(2), dim=0)

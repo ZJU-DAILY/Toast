@@ -58,7 +58,7 @@ class PredictTrainer(Trainer):
             self.model.train()
             for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
                 self.optimizer.zero_grad()
-                if self.train_dataset.model_type == "STMetaNet":
+                if self.train_dataset.model_name == "STMetaNet":
                     flow, features, labels = batch
                     flow, features, labels = flow.to(self.device), features.to(self.device), labels.to(self.device)
                     predicts, labels = self.model(flow, features, labels, edge_index, train_mode=True)
@@ -104,7 +104,7 @@ class PredictTrainer(Trainer):
         edge_index = None if edge_index is None else edge_index.to(self.device)
         cnt, rmse, mae = 0., 0., 0.
         for batch in tqdm.tqdm(eval_loader, total=len(eval_loader), desc=mode):
-            if self.train_dataset.model_type == "STMetaNet":
+            if self.train_dataset.model_name == "STMetaNet":
                 flow, features, labels = batch
                 flow, features, labels = flow.to(self.device), features.to(self.device), labels.to(self.device)
                 predicts, labels = self.model(flow, features, labels, edge_index, train_mode=False)

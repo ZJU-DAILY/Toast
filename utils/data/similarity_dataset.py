@@ -8,20 +8,20 @@ from torch.utils.data import Dataset
 
 
 class SimilarityDataset(Dataset):
-    model_type = None
+    model_name = None
 
     def __init__(
             self,
             traj_dir,
             groundtruth_dir,
             mode,
-            model_type,
+            model_name,
             train_size=10000,
             valid_size=4000,
             test_size=16000
     ):
         self.mode = mode
-        SimilarityDataset.model_type = model_type
+        SimilarityDataset.model_name = model_name
         self.train_size = train_size
         self.valid_size = valid_size
         self.test_size = test_size
@@ -57,17 +57,20 @@ class SimilarityDataset(Dataset):
 
     def process(self, traj_dir, gt_dir=None):
         if self.mode == "train":
-            node_triple_path = os.path.join(traj_dir, "triplet/TP/node_triplets_2w_STBall")
+            node_triple_path = os.path.join(traj_dir, f"triplet/TP/{self.model_name}/node_triplets_2w_STBall")
             with open(node_triple_path, "rb") as n_file:
                 node_triples = pkl.load(n_file)
-            dist_triple_path = os.path.join(gt_dir, "TP/train_triplet_2w_STBall.npy")
-            dist_data = np.load(dist_triple_path)
-            time_triple_path = os.path.join(traj_dir, "triplet/TP/d2vec_triplets_2w_STBall")
+            dist_triple_path = os.path.join(gt_dir, f"TP/{self.model_name}/train_triplet_2w_STBall.npy")
+            dist_data = np.load(dist_triple_path, allow_pickle=True)
+            time_triple_path = os.path.join(traj_dir, f"triplet/TP/{self.model_name}/d2vec_triplets_2w_STBall")
             with open(time_triple_path, "rb") as t_file:
                 transform_time_triples = pkl.load(t_file)
             seq_len_triples = []
-            for a_seq, p_seq, n_seq in transform_time_triples:
-                seq_len = [len(a_seq), len(p_seq), len(n_seq)]
+            for nodes, times in zip(node_triples, transform_time_triples):
+                a_nseq, p_nseq, n_nseq = nodes
+                a_tseq, p_tseq, n_tseq = times
+                assert len(a_nseq) == len(a_tseq)
+                seq_len = [len(a_tseq), len(p_tseq), len(n_tseq)]
                 seq_len_triples.append(seq_len)
             return node_triples, transform_time_triples, seq_len_triples, dist_data
         else:
@@ -80,8 +83,8 @@ class SimilarityDataset(Dataset):
                 assert len(n_seq) == len(t_seq), "length of node list and time list should be equal"
                 lengths.append(len(n_seq))
             if self.mode == "valid":
-                dist_path = os.path.join(gt_dir, "TP/vali_st_distance.npy")
-                dist = np.load(dist_path)
+                dist_path = os.path.join(gt_dir, f"TP/{self.model_name}/vali_st_distance.npy")
+                dist = np.load(dist_path, allow_pickle=True)
                 num_tests, dimension = dist.shape
                 dist_data = np.full((self.valid_size, dimension), -1, dtype=float)
                 dist_data[:num_tests] = dist
@@ -93,8 +96,8 @@ class SimilarityDataset(Dataset):
                     dist_data
                 )
             else:
-                dist_path = os.path.join(gt_dir, "TP/test_st_distance.npy")
-                dist = np.load(dist_path)
+                dist_path = os.path.join(gt_dir, f"TP/{self.model_name}/test_st_distance.npy")
+                dist = np.load(dist_path, allow_pickle=True)
                 num_tests, dimension = dist.shape
                 dist_data = np.full((self.test_size, dimension), -1, dtype=float)
                 dist_data[:num_tests] = dist
