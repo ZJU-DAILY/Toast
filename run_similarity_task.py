@@ -26,6 +26,9 @@ def parse_args(args=None):
     parser.add_argument("--saved_path", type=str, default=None, help="model checkpoint")
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
+
+    parser.add_argument("--num_virtual_tokens", type=int, default=20)
+    parser.add_argument("--num_augment_epochs", type=int, default=20)
     return parser.parse_args()
 
 
@@ -47,7 +50,6 @@ def get_graph_features(graph_dir, feat_dim, device):
     edge_index = torch.tensor(edge_index, dtype=torch.long, device=device).T
     edge_attr = torch.tensor(df_dege["length"].to_numpy(), dtype=torch.float, device=device)
     num_nodes = df_node["node"].size
-    print(num_nodes)
 
     if os.path.exists(graph_dir + "/node_features.npy"):
         node_feats = np.load(graph_dir + "/node_features.npy")
@@ -163,8 +165,8 @@ def main():
             TaskType.TRAJ_SIMILAR,
             model_name=model_name,
             virtual_dim=config["feature_dim"],
-            num_virtual_tokens=20,
-            num_epochs=args.num_epochs
+            num_virtual_tokens=args.num_virtual_tokens,
+            num_epochs=args.num_augment_epochs
         )
         augmentor = PointUnion(augment_config, trainer, None, device)
         augment_result = augmentor.augment_points(

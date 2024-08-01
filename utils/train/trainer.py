@@ -37,6 +37,9 @@ class Trainer:
     def compute_loss(self, *args):
         raise NotImplementedError
 
+    def compute_metrics(self, *args):
+        raise NotImplementedError
+
     def train(self, *args):
         raise NotImplementedError
 

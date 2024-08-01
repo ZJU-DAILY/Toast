@@ -9,17 +9,23 @@ from torch.optim import AdamW
 from utils.data import ModeIdentifyDataset
 from utils.train import ModeIdentifyTrainer
 from models.identify_models import SECA
+from augment.augment_config import PointUnionConfig, TaskType
+from augment.point_union import PointUnion
 
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="transportation mode identification")
     parser.add_argument("--dataset", type=str, default="Geolife")
+    parser.add_argument("--model_name", type=str, default="SECA")
     parser.add_argument("--num_epochs", type=int, default=20, help="epochs")
     parser.add_argument("--batch_size", type=int, default=64, help="batch size")
     parser.add_argument("--phase", type=str, default=None, help="select from `train`, `test`, `augment`")
     parser.add_argument("--saved_path", type=str, default=None, help="model checkpoint")
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
+
+    parser.add_argument("--num_virtual_tokens", type=int, default=20)
+    parser.add_argument("--num_augment_epochs", type=int, default=20)
     return parser.parse_args()
 
 
@@ -40,7 +46,7 @@ def main():
     with open("configs/identify_config.json", 'r') as config_file:
         config = json.load(config_file)
     input_dim = config["input_dim"]
-    ckpt_dir = f"./ckpt/SECA-{args.dataset}-{input_dim}" if args.saved_path is None else args.saved_path
+    ckpt_dir = f"./ckpt/{args.model_name}-{args.dataset}-{input_dim}" if args.saved_path is None else args.saved_path
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
 
@@ -84,6 +90,26 @@ def main():
                       metric_result[2],
                       metric_result[3],
                       metric_result[4]))
+    if (phase is None) or (phase == "augment"):
+        trainer.load_model()
+        augment_config = PointUnionConfig(
+            TaskType.TYPE_IDENTIFY,
+            model_name=args.model_name,
+            virtual_dim=config["input_dim"],
+            num_virtual_tokens=args.num_virtual_tokens,
+            num_epochs=args.num_augment_epochs
+        )
+        augmentor = PointUnion(augment_config, trainer, None, device)
+        augment_result = augmentor.augment_points(
+            test_dataset,
+            max_length=config["max_length"]
+        )
+        print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tMacro F1: {:.4f}\tWeighted F1: {:.4f}\n"
+              .format(augment_result[0],
+                      augment_result[1],
+                      augment_result[2],
+                      augment_result[3],
+                      augment_result[4]))
 
 
 if __name__ == "__main__":

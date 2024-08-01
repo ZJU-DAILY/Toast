@@ -59,7 +59,7 @@ class ModeIdentifyTrainer(Trainer):
             print("[start {}-th training]".format(epoch + 1))
             self.model.train()
             for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
-                batch_data, batch_labels = batch
+                batch_data, _, batch_labels = batch
                 batch_data, batch_labels = batch_data.to(self.device), batch_labels.to(self.device)
                 self.optimizer.zero_grad()
                 recover_data, pred_logits = self.model(batch_data, batch_data)
@@ -78,6 +78,15 @@ class ModeIdentifyTrainer(Trainer):
                 print("valid f1: {:.4f}".format(results[-1]))
 
     @torch.no_grad()
+    def compute_metrics(self, pred_labels, true_labels):
+        acc = accuracy_score(true_labels.numpy(), pred_labels.numpy())
+        prec = precision_score(true_labels.numpy(), pred_labels.numpy(), average="weighted")
+        recall = recall_score(true_labels.numpy(), pred_labels.numpy(), average="weighted")
+        macro_f1 = f1_score(true_labels.numpy(), pred_labels.numpy(), average="macro")
+        weighted_f1 = f1_score(true_labels.numpy(), pred_labels.numpy(), average="weighted")
+        return acc, prec, recall, macro_f1, weighted_f1
+
+    @torch.no_grad()
     def evaluate(self, test_dataset: Dataset = None, *args):
         if test_dataset is None:
             eval_loader = self.get_eval_dataloader()
@@ -89,18 +98,13 @@ class ModeIdentifyTrainer(Trainer):
         self.model.eval()
         predictions, true_labels = [], []
         for batch in tqdm.tqdm(eval_loader, total=len(eval_loader), desc=mode):
-            batch_data, batch_labels = batch
+            batch_data, _, batch_labels = batch
             batch_data, batch_labels = batch_data.to(self.device), batch_labels.to(self.device)
             recover_data, pred_logits = self.model(batch_data, batch_data)
 
             pred_labels = torch.argmax(pred_logits, dim=-1)
-            batch_labels, pred_labels = batch_labels.cpu(), pred_labels.cpu()
-            true_labels.append(batch_labels)
-            predictions.append(pred_labels)
+            true_labels.append(batch_labels.cpu())
+            predictions.append(pred_labels.cpu())
         true_labels, pred_labels = torch.cat(true_labels, dim=0), torch.cat(predictions, dim=0)
-        acc = accuracy_score(true_labels.numpy(), pred_labels.numpy())
-        prec = precision_score(true_labels.numpy(), pred_labels.numpy(), average="weighted")
-        recall = recall_score(true_labels.numpy(), pred_labels.numpy(), average="weighted")
-        macro_f1 = f1_score(true_labels.numpy(), pred_labels.numpy(), average="macro")
-        weighted_f1 = f1_score(true_labels.numpy(), pred_labels.numpy(), average="weighted")
+        acc, prec, recall, macro_f1, weighted_f1 = self.compute_metrics(pred_labels, true_labels)
         return acc, prec, recall, macro_f1, weighted_f1

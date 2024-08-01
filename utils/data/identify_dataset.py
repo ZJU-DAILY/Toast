@@ -37,10 +37,11 @@ class ModeIdentifyDataset(Dataset):
         return len(self.trip_data)
 
     def __getitem__(self, item):
-        pad_size = self.max_length - self.trip_data[item].shape[0]
+        length = self.trip_data[item].shape[0]
+        pad_size = self.max_length - length
         data = self.trip_data[item][:, 3:3 + self.input_dim]
         data = F.pad(data, (0, 0, 0, pad_size), "constant", 0.0)
-        return data.unsqueeze(0), self.labels[item]
+        return data.unsqueeze(0), length, self.labels[item]
 
     def process(self, maximal_triptime):
         traj_path = os.path.join(self.traj_dir, f"{self.mode}.txt")
@@ -72,10 +73,10 @@ class ModeIdentifyDataset(Dataset):
             while i < len(trajectory) - 1:
                 delta_time = (trajectory[i + 1][2] - trajectory[i][2]) * 24 * 3600
                 mode_not_change = (trajectory[i + 1][-1] == trajectory[i][-1])
-                if 0 < delta_time <= maximal_triptime and mode_not_change and len(trip) + 1 < self.max_length:
+                if 0 < delta_time <= maximal_triptime and mode_not_change and len(trip) + 21 < self.max_length:
                     trip.append(trajectory[i][:-1])
                     i += 1
-                elif delta_time > maximal_triptime or not mode_not_change or len(trip) + 1 == self.max_length:
+                elif delta_time > maximal_triptime or not mode_not_change or len(trip) + 21 == self.max_length:
                     trip.append(trajectory[i][:-1])
                     trip_data.append(torch.tensor(trip))
                     labels.append(trajectory[i][-1])
@@ -102,5 +103,6 @@ class ModeIdentifyDataset(Dataset):
     def collate_fn(batch):
         func = lambda x: [sample[x] for sample in batch]
         batch_data = torch.stack(func(0), dim=0)
-        batch_labels = torch.tensor(func(1), dtype=torch.long)
-        return batch_data, batch_labels
+        batch_length = torch.tensor(func(1), dtype=torch.long)
+        batch_labels = torch.tensor(func(2), dtype=torch.long)
+        return batch_data, batch_length, batch_labels

@@ -24,6 +24,9 @@ def parse_args(args=None):
     parser.add_argument("--saved_path", type=str, default=None, help="model checkpoint")
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
+
+    parser.add_argument("--num_virtual_tokens", type=int, default=20)
+    parser.add_argument("--num_augment_epochs", type=int, default=20)
     return parser.parse_args()
 
 
@@ -204,8 +207,8 @@ def main():
         augment_config = PointUnionConfig(
             TaskType.TRAJ_RECOVERY,
             model_name=model_name,
-            num_virtual_tokens=20,
-            num_epochs=args.num_epochs
+            num_virtual_tokens=args.num_virtual_tokens,
+            num_epochs=args.num_augment_epochs
         )
         augmentor = PointUnion(augment_config, trainer, None, device)
         if model_name == "RNTrajRec":

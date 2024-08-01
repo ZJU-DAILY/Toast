@@ -170,8 +170,6 @@ class RecoveryTrainer(Trainer):
             decay_param: Optional[float] = None,
             tf_ratio: float = 0.
     ):
-        road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)
-        road_edge, road_batch = road_edge.long().to(self.device), road_batch.to(self.device)
         road_feat = road_feat.to(self.device)
         best_loss = float("inf")
         train_loader = self.get_train_dataloader()
@@ -190,6 +188,8 @@ class RecoveryTrainer(Trainer):
                                                                           tgt_rate_seq.to(self.device), \
                                                                           tgt_inf_scores.to(self.device)
                 if self.train_dataset.model_name == "RNTrajRec":
+                    road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)
+                    road_edge, road_batch = road_edge.long().to(self.device), road_batch.to(self.device)
                     batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
                     traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
 
@@ -198,23 +198,25 @@ class RecoveryTrainer(Trainer):
                                                                   road_feat, src_grid_seq, src_seq_len, feat_seq, node_index,
                                                                   traj_edge, batched_graph.batch, batched_graph.weight,
                                                                   tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio)
+                    gt = batched_graph.gt
                 else:
                     self.optimizer.zero_grad()
                     output_node, output_rate, logits = self.model(road_feat, src_grid_seq, src_seq_len, feat_seq,
                                                                   tgt_node_seq, tgt_rate_seq, tgt_seq_len,
                                                                   tgt_inf_scores,
                                                                   tf_ratio)
+                    gt = None
                 output_node_dim = output_node.size(2)
                 output_node = output_node.permute(1, 0, 2)[1:]
                 output_node = output_node.reshape(-1, output_node_dim)  # ((len - 1) * batch_size, node_size)
                 output_rate = output_rate.permute(1, 0, 2).squeeze(-1)[1:]  # ((len - 1), batch_size)
-                logits = logits.squeeze(-1)  # (num_nodes)
+                logits = logits.squeeze(-1) if logits is not None else logits  # (num_nodes)
 
                 tgt_node_seq = tgt_node_seq.permute(1, 0, 2)[1:].squeeze(-1)
                 tgt_node_seq = tgt_node_seq.reshape(-1)  # ((len - 1) * batch_size)
                 tgt_rate_seq = tgt_rate_seq.permute(1, 0, 2)[1:].squeeze(-1)  # ((len - 1), batch_size)
                 loss = self.compute_loss(output_node, output_rate, logits,
-                                         tgt_node_seq, tgt_rate_seq, batched_graph.gt,
+                                         tgt_node_seq, tgt_rate_seq, gt,
                                          src_seq_len, tgt_seq_len, weights)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
@@ -261,8 +263,6 @@ class RecoveryTrainer(Trainer):
             self.load_model()
             mode = "test"
         self.model.eval()
-        road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)
-        road_edge, road_batch = road_edge.long().to(self.device), road_batch.to(self.device)
         road_feat = road_feat.to(self.device)
 
         total_acc, total_prec, total_recall, total_f1, total_mae, total_rmse, total_loss = [], [], [], [], [], [], .0
@@ -280,7 +280,10 @@ class RecoveryTrainer(Trainer):
                                                                           tgt_inf_scores.to(self.device)
                 self.optimizer.zero_grad()
                 if self.train_dataset.model_name == "RNTrajRec":
+                    road_grid, road_nodes = road_grid.to(self.device), road_nodes.to(self.device)
+                    road_edge, road_batch = road_edge.long().to(self.device), road_batch.to(self.device)
                     batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
+                    traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
 
                     output_node, output_rate, logits = self.model(road_grid, road_len, road_nodes, road_edge,
                                                                   road_batch,
