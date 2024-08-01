@@ -11,11 +11,14 @@ Ground_Mode = ["walk", "bike", "bus", "car", "taxi", "subway", "railway", "train
 # each line contains `Latitude`, `Longitude`, `Flag`, `Altitude`, `Number of days`, `Datetime`,
 # `Transportation Mode`, `Distance`, `Bearing Rate`, `Time Diff`, `Speed`, `Acceleration`, `Jerk`
 class ModeIdentifyDataset(Dataset):
+    model_name = None
+
     def __init__(
             self,
             traj_dir,
             input_dim,
             mode,
+            model_name,
             minimal_num_points=20,
             maximal_num_points=248,
             minimal_distance=150,
@@ -24,6 +27,7 @@ class ModeIdentifyDataset(Dataset):
         self.traj_dir = traj_dir
         self.input_dim = input_dim
         self.mode = mode
+        ModeIdentifyDataset.model_name = model_name
         self.max_length = maximal_num_points
         trip_data, labels = self.process(maximal_triptime=20 * 60)
         self.trip_data, self.labels = self.filter(

@@ -502,12 +502,17 @@ class PointUnion(nn.Module):
                 suffix_data, _ = self.append_virtual_embedding(
                     batch_data.squeeze(dim=1), seq_len
                 )
-                hidden_unlabel, pool_indices, hidden_label = self.trainer.model.encoding(
-                    suffix_data.unsqueeze(dim=1), suffix_data.unsqueeze(dim=1)
-                )
-                recover_data = self.trainer.model.decoding(hidden_unlabel, pool_indices[::-1])
-                pred_logits = self.trainer.model.cls_layer(hidden_label)
-                recover_data = recover_data.permute(0, 2, 3, 1)[:, :max_length]
+                if self.config.model_name == "SECA":
+                    hidden_unlabel, pool_indices, hidden_label = self.trainer.model.encoding(
+                        suffix_data.unsqueeze(dim=1), suffix_data.unsqueeze(dim=1)
+                    )
+                    recover_data = self.trainer.model.decoding(hidden_unlabel, pool_indices[::-1])
+                    pred_logits = self.trainer.model.cls_layer(hidden_label)
+                    recover_data = recover_data.permute(0, 2, 3, 1)[:, :max_length]
+                else:
+                    hiddens, _ = self.trainer.model.encoding(suffix_data.unsqueeze(dim=1))
+                    pred_logits = self.trainer.model.decoding(hiddens)
+                    recover_data = None
 
                 loss = self.trainer.compute_loss(recover_data, pred_logits, batch_data, batch_labels)
                 loss.backward()
@@ -528,10 +533,14 @@ class PointUnion(nn.Module):
             suffix_data, _ = self.append_virtual_embedding(
                 batch_data.squeeze(dim=1), seq_len
             )
-            hidden_unlabel, pool_indices, hidden_label = self.trainer.model.encoding(
-                suffix_data.unsqueeze(dim=1), suffix_data.unsqueeze(dim=1)
-            )
-            pred_logits = self.trainer.model.cls_layer(hidden_label)
+            if self.config.model_name == "SECA":
+                hidden_unlabel, pool_indices, hidden_label = self.trainer.model.encoding(
+                    suffix_data.unsqueeze(dim=1), suffix_data.unsqueeze(dim=1)
+                )
+                pred_logits = self.trainer.model.cls_layer(hidden_label)
+            else:
+                hiddens, _ = self.trainer.model.encoding(suffix_data.unsqueeze(dim=1))
+                pred_logits = self.trainer.model.decoding(hiddens)
             pred_labels.append(pred_logits.argmax(dim=-1).cpu())
             true_labels.append(batch_labels.cpu())
         true_labels, pred_labels = torch.cat(true_labels, dim=0), torch.cat(pred_labels, dim=0)

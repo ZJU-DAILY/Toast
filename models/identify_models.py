@@ -66,7 +66,7 @@ class Encoder(nn.Module):
             ]
         )
 
-    def forward(self, unlabeled_data: torch.Tensor, labeled_data: torch.Tensor):
+    def forward(self, unlabeled_data: torch.Tensor, labeled_data: torch.Tensor = None):
         """
 
         Args:
@@ -81,11 +81,13 @@ class Encoder(nn.Module):
         for i, layer in enumerate(self.data_convs):
             hidden_unlabel, indices = layer(hidden_unlabel)
             pool_indices.append(indices)
-
-        hidden_labeled = labeled_data.permute(0, 3, 1, 2)
-        for layer in self.label_convs:
-            hidden_labeled = layer(hidden_labeled)
-        return hidden_unlabel, pool_indices, hidden_labeled
+        if labeled_data is None:
+            return hidden_unlabel, pool_indices
+        else:
+            hidden_labeled = labeled_data.permute(0, 3, 1, 2)
+            for layer in self.label_convs:
+                hidden_labeled = layer(hidden_labeled)
+            return hidden_unlabel, pool_indices, hidden_labeled
 
 
 class Decoder(nn.Module):
@@ -190,3 +192,31 @@ class SECA(BaseModel):
         decoded_data = self.decoding(hidden_unlabeled, pool_indices[::-1])
         logits = self.cls_layer(hidden_labeled)
         return decoded_data, logits
+
+
+class CNNSECA(BaseModel):
+    def __init__(self, input_dim, num_classes, max_length, hidden_dims):
+        super(CNNSECA, self).__init__()
+        self.encoder = Encoder(input_dim, hidden_dims)
+        cls_size = hidden_dims[-1] * max_length // (2 ** len(hidden_dims))
+        self.decoder = nn.Sequential(
+            nn.Linear(cls_size, cls_size // 4),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(cls_size // 4, num_classes)
+        )
+
+    def extract_feat(self, *args):
+        pass
+
+    def encoding(self, data):
+        return self.encoder(data)
+
+    def decoding(self, hidden_repr):
+        flatten_repr = hidden_repr.permute(0, 2, 3, 1).flatten(start_dim=1)
+        return self.decoder(flatten_repr)
+
+    def forward(self, inputs):
+        hiddens, _ = self.encoding(inputs)
+        logits = self.decoding(hiddens)
+        return logits

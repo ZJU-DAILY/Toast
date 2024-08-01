@@ -44,12 +44,14 @@ class ModeIdentifyTrainer(Trainer):
             setattr(self, key, val)
 
     def compute_loss(self, recover_data, pred_logits, true_data, true_labels):
-        regression_criterion = nn.MSELoss(reduction="mean")
         classification_criterion = nn.CrossEntropyLoss(reduction="mean")
-
-        recover_loss = regression_criterion(recover_data, true_data)
-        predict_loss = classification_criterion(pred_logits, true_labels)
-        loss = recover_loss * 100 + predict_loss
+        if recover_data is None:
+            loss = classification_criterion(pred_logits, true_labels)
+        else:
+            regression_criterion = nn.MSELoss(reduction="mean")
+            recover_loss = regression_criterion(recover_data, true_data)
+            predict_loss = classification_criterion(pred_logits, true_labels)
+            loss = recover_loss * 100 + predict_loss
         return loss
 
     def train(self):
@@ -62,8 +64,11 @@ class ModeIdentifyTrainer(Trainer):
                 batch_data, _, batch_labels = batch
                 batch_data, batch_labels = batch_data.to(self.device), batch_labels.to(self.device)
                 self.optimizer.zero_grad()
-                recover_data, pred_logits = self.model(batch_data, batch_data)
-                recover_data = recover_data.permute(0, 2, 3, 1)
+                if self.train_dataset.model_name == "SECA":
+                    recover_data, pred_logits = self.model(batch_data, batch_data)
+                    recover_data = recover_data.permute(0, 2, 3, 1)
+                else:
+                    recover_data, pred_logits = None, self.model(batch_data)
                 loss = self.compute_loss(recover_data, pred_logits, batch_data, batch_labels)
                 loss.backward()
                 self.optimizer.step()
@@ -100,7 +105,10 @@ class ModeIdentifyTrainer(Trainer):
         for batch in tqdm.tqdm(eval_loader, total=len(eval_loader), desc=mode):
             batch_data, _, batch_labels = batch
             batch_data, batch_labels = batch_data.to(self.device), batch_labels.to(self.device)
-            recover_data, pred_logits = self.model(batch_data, batch_data)
+            if self.train_dataset.model_name == "SECA":
+                recover_data, pred_logits = self.model(batch_data, batch_data)
+            else:
+                pred_logits = self.model(batch_data)
 
             pred_labels = torch.argmax(pred_logits, dim=-1)
             true_labels.append(batch_labels.cpu())

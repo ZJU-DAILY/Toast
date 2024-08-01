@@ -8,7 +8,7 @@ from torch.optim import AdamW
 
 from utils.data import ModeIdentifyDataset
 from utils.train import ModeIdentifyTrainer
-from models.identify_models import SECA
+from models.identify_models import SECA, CNNSECA
 from augment.augment_config import PointUnionConfig, TaskType
 from augment.point_union import PointUnion
 
@@ -44,15 +44,16 @@ def main():
     traj_dir = os.path.join("./data", args.dataset)
     phase = args.phase
     with open("configs/identify_config.json", 'r') as config_file:
-        config = json.load(config_file)
+        configs = json.load(config_file)
+        config = configs[args.model_name]
     input_dim = config["input_dim"]
     ckpt_dir = f"./ckpt/{args.model_name}-{args.dataset}-{input_dim}" if args.saved_path is None else args.saved_path
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
 
-    train_dataset = ModeIdentifyDataset(traj_dir, input_dim, "train", maximal_num_points=config["max_length"])
-    valid_dataset = ModeIdentifyDataset(traj_dir, input_dim, "valid", maximal_num_points=config["max_length"])
-    test_dataset = ModeIdentifyDataset(traj_dir, input_dim, "test", maximal_num_points=config["max_length"])
+    train_dataset = ModeIdentifyDataset(traj_dir, input_dim, "train", args.model_name, maximal_num_points=config["max_length"])
+    valid_dataset = ModeIdentifyDataset(traj_dir, input_dim, "valid", args.model_name, maximal_num_points=config["max_length"])
+    test_dataset = ModeIdentifyDataset(traj_dir, input_dim, "test", args.model_name, maximal_num_points=config["max_length"])
 
     model_params = {
         "input_dim": input_dim,
@@ -60,7 +61,10 @@ def main():
         "max_length": config["max_length"],
         "hidden_dims": config["hidden_dims"]
     }
-    model = SECA(**model_params).to(device)
+    if args.model_name == "SECA":
+        model = SECA(**model_params).to(device)
+    else:
+        model = CNNSECA(**model_params).to(device)
 
     optim = AdamW(model.parameters(), lr=config["learning_rate"])
     trainer = ModeIdentifyTrainer(model, train_dataset, valid_dataset, optim,
