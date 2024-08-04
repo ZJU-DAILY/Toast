@@ -77,10 +77,10 @@ class ModeIdentifyDataset(Dataset):
             while i < len(trajectory) - 1:
                 delta_time = (trajectory[i + 1][2] - trajectory[i][2]) * 24 * 3600
                 mode_not_change = (trajectory[i + 1][-1] == trajectory[i][-1])
-                if 0 < delta_time <= maximal_triptime and mode_not_change and len(trip) + 21 < self.max_length:
+                if 0 < delta_time <= maximal_triptime and mode_not_change and len(trip) + 26 < self.max_length:
                     trip.append(trajectory[i][:-1])
                     i += 1
-                elif delta_time > maximal_triptime or not mode_not_change or len(trip) + 21 == self.max_length:
+                elif delta_time > maximal_triptime or not mode_not_change or len(trip) + 26 == self.max_length:
                     trip.append(trajectory[i][:-1])
                     trip_data.append(torch.tensor(trip))
                     labels.append(trajectory[i][-1])
