@@ -56,12 +56,12 @@ class FeatureExtractor(nn.Module):
     def __init__(self, spatial_dim, temporal_dim, hidden_dim, pretrain, pretrain_model):
         super(FeatureExtractor, self).__init__()
         self.pos_encoder = LocationEmbedding(spatial_dim, hidden_dim)
-        self.time_encoder = TimeEmbedding(
-            temporal_dim,
-            hidden_dim,
-            pretrain,
-            pretrain_model
-        )
+        # self.time_encoder = TimeEmbedding(
+        #     temporal_dim,
+        #     hidden_dim,
+        #     pretrain,
+        #     pretrain_model
+        # )
 
     def forward(self, traj_seqs, time_seqs, seq_len, node_feat, edge_index, edge_feat=None):
         spatial_embeds = self.pos_encoder(traj_seqs, seq_len, node_feat, edge_index, edge_feat)

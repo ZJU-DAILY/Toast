@@ -40,6 +40,9 @@ class Trainer:
     def compute_metrics(self, *args):
         raise NotImplementedError
 
+    def forward_once(self, *args):
+        raise NotImplementedError
+
     def train(self, *args):
         raise NotImplementedError
 

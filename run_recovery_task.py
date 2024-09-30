@@ -10,8 +10,9 @@ from utils.roadmap import SegmentCentricRoadNetwork
 from utils.data import SPoint, RecoveryDataset
 from utils.train import RecoveryTrainer
 from models.recovery_model import RNTrajRec, MTrajRec
-from augment.augment_config import TaskType, PointUnionConfig
+from augment.augment_config import PointUnionConfig, TrajUnionConfig, TaskType
 from augment.point_union import PointUnion
+from augment.trajectory_union import TrajUnion
 
 
 def parse_args(args=None):
@@ -25,6 +26,8 @@ def parse_args(args=None):
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
 
+    parser.add_argument("--augment_type", type=str, default="PointUnion")
+    parser.add_argument("--union_ratio", type=float, default=0.05)
     parser.add_argument("--num_virtual_tokens", type=int, default=20)
     parser.add_argument("--num_augment_epochs", type=int, default=20)
     return parser.parse_args()
@@ -204,46 +207,69 @@ def main():
                       metric_result[5]))
     if (phase is None) or (phase == "augment"):
         trainer.load_model()
-        augment_config = PointUnionConfig(
-            TaskType.TRAJ_RECOVERY,
-            model_name=model_name,
-            num_virtual_tokens=args.num_virtual_tokens,
-            num_epochs=args.num_augment_epochs
-        )
-        augmentor = PointUnion(augment_config, trainer, None, device)
         if model_name == "RNTrajRec":
-            augment_result = augmentor.augment_points(
-                test_dataset,
+            model_kwargs = dict(
                 road_net=road_net,
                 road_grid=road_grid,
                 road_len=road_len,
-                road_nodes=road_node_index,
-                road_edge=subgraph.edge_index,
-                road_batch=subgraph.batch,
-                road_feat=road_feat,
+                road_nodes=road_node_index.to(device),
+                road_edge=subgraph.edge_index.long().to(device),
+                road_batch=subgraph.batch.to(device),
+                road_feat=road_feat.to(device),
+                tf_ratio=0.,
                 weights=[config["lambda1"], config["lambda2"]]
             )
-            print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
-                  .format(augment_result[0],
-                          augment_result[1],
-                          augment_result[2],
-                          augment_result[3],
-                          augment_result[4],
-                          augment_result[5]))
         else:
+            model_kwargs = dict(
+                road_net=road_net,
+                road_feat=road_feat.to(device),
+                tf_ratio=0.,
+                weights=[config["lambda1"], config["lambda2"]]
+            )
+        if args.augment_type == "PointUnion":
+            augment_config = PointUnionConfig(
+                TaskType.TRAJ_SIMILAR,
+                model_name=model_name,
+                virtual_dim=config["feature_dim"],
+                num_virtual_tokens=args.num_virtual_tokens,
+                num_epochs=args.num_augment_epochs
+            )
+            augmentor = PointUnion(augment_config, trainer, None, device)
             augment_result = augmentor.augment_points(
                 test_dataset,
-                road_net=road_net,
-                road_feat=road_feat,
-                weights=[config["lambda1"], config["lambda2"]]
+                **model_kwargs
             )
-            print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
-                  .format(augment_result[0],
-                          augment_result[1],
-                          augment_result[2],
-                          augment_result[3],
-                          augment_result[4],
-                          augment_result[5]))
+        elif args.augment_type == "TrajUnion":
+            augment_dataset = RecoveryDataset(traj_dir, road_net, zone_range, "augment", model_name, **dataset_params)
+            augment_config = TrajUnionConfig(
+                task_type=TaskType.TRAJ_SIMILAR,
+                model_name=model_name,
+                num_augments=int(args.union_ratio * len(train_dataset))
+            )
+            augmentor = TrajUnion(
+                config=augment_config,
+                trainer=trainer,
+                augment_dataset=augment_dataset,
+                device=device
+            )
+            train_subset = augmentor.select_augmentation(model_kwargs)
+            trainer.train_dataset = train_subset
+            trainer.saved_dir = os.path.join(ckpt_dir, "traj_union")
+            trainer.train(**model_kwargs)
+            augment_result = trainer.evaluate(
+                test_dataset,
+                **model_kwargs
+            )
+        else:
+            raise NotImplementedError("Please specify the way of data augmentation.")
+
+        print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tF1: {:.4f}\tMAE: {:.4f}\tRMSE: {:.4f}\n"
+              .format(augment_result[0],
+                      augment_result[1],
+                      augment_result[2],
+                      augment_result[3],
+                      augment_result[4],
+                      augment_result[5]))
 
 
 if __name__ == "__main__":

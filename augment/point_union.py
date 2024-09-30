@@ -437,55 +437,6 @@ class PointUnion(nn.Module):
         hr10, hr50, hr10_50 = self.trainer.compute_metrics(embeddings.cpu().numpy(), true_dist[:5000].numpy())
         return hr10, hr50, hr10_50
 
-    @torch.no_grad()
-    def evaluate_similarity_augment(
-            self,
-            test_set,
-            node_feat=None,
-            edge_index=None,
-            edge_attr=None
-    ):
-        self.trainer.model.eval()
-        test_loader = self.trainer.get_test_dataloader(test_set)
-        embeddings, true_dist = [], []
-        for batch in tqdm.tqdm(test_loader, total=len(test_loader),
-                               desc="evaluate virtual embeddings"):
-            if self.config.model_name == "ST2Vec":
-                nodes, time, seq_len, dist = batch
-                nodes, time = nodes.to(self.device), time.to(self.device)
-                spatial_embeds, time_embeds = self.trainer.model.extract_feat(
-                    nodes, time, seq_len, node_feat, edge_index, edge_attr
-                )
-                suffix_spatial_embeds, augment_lengths = self.append_virtual_embedding(
-                    spatial_embeds, seq_len
-                )
-                suffix_temporal_embeds, _ = self.append_virtual_embedding(
-                    time_embeds, seq_len
-                )
-                batch_embeds = self.trainer.model.encoding(
-                    suffix_spatial_embeds,
-                    suffix_temporal_embeds,
-                    augment_lengths
-                )
-            else:
-                nodes, _, seq_len, dist = batch
-                nodes = nodes.to(self.device)
-                spatial_embeds = self.trainer.model.extract_feat(
-                    nodes, seq_len, node_feat, edge_index, edge_attr
-                )
-                suffix_spatial_embeds, augment_lengths = self.append_virtual_embedding(
-                    spatial_embeds, seq_len
-                )
-                batch_embeds = self.trainer.model.encoding(
-                    suffix_spatial_embeds, augment_lengths
-                )
-            embeddings.append(batch_embeds)
-            true_dist.append(dist)
-        embeddings = torch.cat(embeddings, dim=0)
-        true_dist = torch.cat(true_dist, dim=0)
-        hr10, hr50, hr10_50 = self.trainer.compute_metrics(embeddings.cpu().numpy(), true_dist[:5000].numpy())
-        return hr10, hr50, hr10_50
-
     def train_identify_virtual_embeddings(
             self,
             dataloader: Optional[DataLoader],

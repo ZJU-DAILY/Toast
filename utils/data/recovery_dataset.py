@@ -67,6 +67,7 @@ class RecoveryDataset(Dataset):
         tgt_trajs = parser.parse(tgt_file, is_target=True, is_save=True)
         assert len(src_trajs) == len(tgt_trajs)
 
+        num_data = 0
         src_grid_seq, src_gps_seq, src_feat_seq = [], [], []
         tgt_gps_seq, tgt_idx_seq, tgt_rate_seq = [], [], []
         keep_ratio = 1. if self.mode == "test" or self.mode == "augment" else keep_ratio
@@ -80,6 +81,10 @@ class RecoveryDataset(Dataset):
             tgt_gps_seq.extend(mm_gps_seq)
             tgt_idx_seq.extend(mm_rid_seq)
             tgt_rate_seq.extend(mm_rate_seq)
+
+            num_data += 1
+            if self.mode == "augment" and num_data >= 30000:
+                break
 
         assert len(src_grid_seq) == len(src_gps_seq) == len(src_feat_seq) == \
                len(tgt_gps_seq) == len(tgt_idx_seq) == len(tgt_rate_seq),\

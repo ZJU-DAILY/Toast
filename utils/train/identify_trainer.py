@@ -54,6 +54,27 @@ class ModeIdentifyTrainer(Trainer):
             loss = recover_loss * 100 + predict_loss
         return loss
 
+    def forward_once(self, model_kwargs, batch, augment_fn=None):
+        batch_data, seq_len, batch_labels = batch
+        batch_data, batch_labels = batch_data.to(self.device), batch_labels.to(self.device)
+        if augment_fn is not None:
+            batch_data, _ = augment_fn(batch_data.squeeze(dim=1), seq_len)
+            batch_data = batch_data.unsqueeze(dim=1)
+        if self.train_dataset.model_name == "SECA":
+            max_length = model_kwargs["max_length"]
+            hidden_unlabel, pool_indices, hidden_label = self.model.encoding(
+                batch_data, batch_data
+            )
+            recover_data = self.model.decoding(hidden_unlabel, pool_indices[::-1])
+            pred_logits = self.model.cls_layer(hidden_label)
+            recover_data = recover_data.permute(0, 2, 3, 1)[:, :max_length]
+        else:
+            hiddens, _ = self.model.encoding(batch_data)
+            pred_logits = self.model.decoding(hiddens)
+            recover_data = None
+        loss = self.compute_loss(recover_data, pred_logits, batch_data, batch_labels)
+        return loss
+
     def train(self):
         best_F1 = float("-inf")
         train_loader = self.get_train_dataloader()

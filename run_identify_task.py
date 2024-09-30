@@ -9,8 +9,9 @@ from torch.optim import AdamW
 from utils.data import ModeIdentifyDataset
 from utils.train import ModeIdentifyTrainer
 from models.identify_models import SECA, CNNSECA
-from augment.augment_config import PointUnionConfig, TaskType
+from augment.augment_config import PointUnionConfig, TrajUnionConfig, TaskType
 from augment.point_union import PointUnion
+from augment.trajectory_union import TrajUnion
 
 
 def parse_args(args=None):
@@ -24,6 +25,8 @@ def parse_args(args=None):
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
 
+    parser.add_argument("--augment_type", type=str, default="PointUnion")
+    parser.add_argument("--union_ratio", type=float, default=0.05)
     parser.add_argument("--num_virtual_tokens", type=int, default=20)
     parser.add_argument("--num_augment_epochs", type=int, default=20)
     return parser.parse_args()
@@ -96,18 +99,45 @@ def main():
                       metric_result[4]))
     if (phase is None) or (phase == "augment"):
         trainer.load_model()
-        augment_config = PointUnionConfig(
-            TaskType.TYPE_IDENTIFY,
-            model_name=args.model_name,
-            virtual_dim=config["input_dim"],
-            num_virtual_tokens=args.num_virtual_tokens,
-            num_epochs=args.num_augment_epochs
-        )
-        augmentor = PointUnion(augment_config, trainer, None, device)
-        augment_result = augmentor.augment_points(
-            test_dataset,
-            max_length=config["max_length"]
-        )
+        if args.model_name == "SECA":
+            model_kwargs = dict(max_length=config["max_length"])
+        else:
+            model_kwargs = dict()
+        if args.augment_type == "PointUnion":
+            augment_config = PointUnionConfig(
+                TaskType.TYPE_IDENTIFY,
+                model_name=args.model_name,
+                virtual_dim=config["input_dim"],
+                num_virtual_tokens=args.num_virtual_tokens,
+                num_epochs=args.num_augment_epochs
+            )
+            augmentor = PointUnion(augment_config, trainer, None, device)
+            augment_result = augmentor.augment_points(
+                test_dataset,
+                max_length=config["max_length"]
+            )
+        elif args.augment_type == "TrajUnion":
+            augment_dataset = ModeIdentifyDataset(traj_dir, input_dim, "augment", args.model_name, maximal_num_points=config["max_length"])
+            augment_config = TrajUnionConfig(
+                task_type=TaskType.TYPE_IDENTIFY,
+                model_name=args.model_name,
+                num_augments=int(args.union_ratio * len(train_dataset)),
+                proj_interval=200,
+                save_interval=200
+            )
+            augmentor = TrajUnion(
+                config=augment_config,
+                trainer=trainer,
+                augment_dataset=augment_dataset,
+                device=device
+            )
+            train_subset = augmentor.select_augmentation(model_kwargs)
+            trainer.train_dataset = train_subset
+            trainer.saved_dir = os.path.join(ckpt_dir, "traj_union")
+            trainer.train()
+            augment_result = trainer.evaluate(test_dataset)
+        else:
+            raise NotImplementedError("Please specify the way of data augmentation.")
         print("ACC: {:.4f}\tRecall: {:.4f}\tPrec: {:.4f}\tMacro F1: {:.4f}\tWeighted F1: {:.4f}\n"
               .format(augment_result[0],
                       augment_result[1],

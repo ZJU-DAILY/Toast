@@ -1,10 +1,20 @@
+import os
 import torch
-from torch.utils.data import Dataset
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, Subset
 from typing import Optional, Union
 from trak.projectors import BasicProjector, CudaProjector
 
-from augment.augment_config import TaskType, TrajUnionConfig
+from augment.augment_config import TrajUnionConfig
 from utils.train.trainer import Trainer
+
+
+class TrajSubset(Subset):
+    model_name = None
+
+    def __init__(self, dataset, indices, model_name):
+        super(TrajSubset, self).__init__(dataset, indices)
+        TrajSubset.model_name = model_name
 
 
 def calculate_influence_score(augment_grads: torch.Tensor, valid_grads: torch.Tensor):
@@ -25,7 +35,7 @@ def calculate_influence_score(augment_grads: torch.Tensor, valid_grads: torch.Te
     return influence_score
 
 
-def move2gpu(args, device):
+def prepare_data(args, device):
     if isinstance(args, dict):
         return {k: v.to(device) for k, v in args.items()}
     elif isinstance(args, tuple):
@@ -33,6 +43,8 @@ def move2gpu(args, device):
         return tuple(args)
     elif isinstance(args, torch.Tensor):
         return args.to(device)
+    else:
+        raise ValueError(f"{type(args)} cannot be moved to GPU.")
 
 
 class TrajUnion:
@@ -52,10 +64,11 @@ class TrajUnion:
         for key, val in kwargs.items():
             setattr(self, key, val)
 
-    def get_projector(self):
+    def get_projector(self, param_indices):
         def get_params_num():
             num_params = sum(
-                [p.numel() for p in self.trainer.model.parameters() if p.requires_grad]
+                [p.numel() for idx, (n, p) in enumerate(self.trainer.model.named_parameters())
+                 if p.requires_grad and idx in param_indices]
             )
             return num_params
         projector = BasicProjector(
@@ -68,10 +81,10 @@ class TrajUnion:
         )
         return projector
 
-    def get_gradients(self, loss, optim_type="adam", **kwargs):
-        loss.backward()
+    def obtain_gradients(self, optim_type="adam", param_indices=None, **kwargs):
         vectorized_grads = torch.cat(
-            [p.grad.view(-1) for p in self.trainer.model.parameters() if p.grad is not None]
+            [p.grad.view(-1) for idx, (n, p) in enumerate(self.trainer.model.named_parameters())
+             if p.requires_grad and idx in param_indices]
         )
         if optim_type == "adam":
             avg, avg_sq = kwargs["avg"], kwargs["avg_sq"]
@@ -82,82 +95,172 @@ class TrajUnion:
         else:
             return vectorized_grads
 
-    def load_optimizer_state(self):
+    def load_optimizer_state(self, optim_type="adam"):
         optim_path = self.trainer.saved_dir + "/optimizer.bin"
-        optim_state = torch.load(optim_path)["state"]
-        names = [n for n, p in self.trainer.model.named_parameters() if p.requires_grad]
-        avg = torch.cat([optim_state[n]["exp_avg"].view(-1) for n in names]).to(self.device)
-        avg_sq = torch.cat([optim_state[n]["exp_avg_sq"].view(-1) for n in names]).to(self.device)
-        return avg, avg_sq
+        state_dict = torch.load(optim_path, map_location="cpu")["state"]
+        param_indices = list(state_dict.keys())
 
-    def forward_once(self, kwargs, args):
-        if self.config.task_type == TaskType.TRAJ_REC:
-            (src_grid_seq, src_gps_seq, feat_seq, src_seq_len, tgt_gps_seq,
-             tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores,
-             batched_graph, node_index) = move2gpu(args, self.device)
-            traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
-            traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
-            output_node, output_rate, logits = self.trainer.model(
-                *kwargs, src_grid_seq, src_seq_len, feat_seq, node_index,
-                traj_edge, batched_graph.batch, batched_graph.weight,
-                tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, 0.
-            )
-            output_node_dim = output_node.size(2)
-            output_node = output_node.permute(1, 0, 2)[1:]
-            output_node = output_node.reshape(-1, output_node_dim)  # ((len - 1) * batch_size, node_size)
-            output_rate = output_rate.permute(1, 0, 2).squeeze(-1)[1:]  # ((len - 1), batch_size)
-            logits = logits.squeeze(-1)  # (num_nodes)
-
-            tgt_node_seq = tgt_node_seq.permute(1, 0, 2)[1:].squeeze(-1)
-            tgt_node_seq = tgt_node_seq.reshape(-1)  # ((len - 1) * batch_size)
-            tgt_rate_seq = tgt_rate_seq.permute(1, 0, 2)[1:].squeeze(-1)  # ((len - 1), batch_size)
-            loss = self.trainer.compute_loss(
-                output_node, output_rate, logits,
-                tgt_node_seq, tgt_rate_seq, batched_graph.gt,
-                src_seq_len, tgt_seq_len, kwargs["weights"]
-            )
-            return loss
+        if optim_type == "adam":
+            avg = torch.cat([state_dict[i]["exp_avg"].view(-1) for i in param_indices]).to(self.device)
+            avg_sq = torch.cat([state_dict[i]["exp_avg_sq"].view(-1) for i in param_indices]).to(self.device)
+            return avg, avg_sq, param_indices
         else:
-            raise NotImplementedError(f"No task {self.config.task_type}")
+            return param_indices
 
-    def collect_grads(self, kwargs):
-        augment_dataloader = self.trainer.get_test_dataloader(self.augment_dataset)
-        projector = self.get_projector()
-        prev_avg, prev_avg_sq = self.load_optimizer_state()
+    # def load_optimizer_state(self, optim_type="adam"):
+    #     optim_path = self.trainer.saved_dir + "/optimizer.bin"
+    #     state_dict = torch.load(optim_path, map_location="cpu")
+    #     opt_param_indices = list(state_dict["state"].keys())
+    #     # opt_param_indices = state_dict["param_groups"][0]["params"]
+    #
+    #     if optim_type == "adam":
+    #         model_param_name, model_params = zip(*[
+    #             (n, p) for idx, (n, p) in enumerate(self.trainer.model.named_parameters())
+    #             if p.requires_grad and idx in opt_param_indices
+    #         ])
+    #         model_param_size = {
+    #             n: p.size() for idx, (n, p) in enumerate(self.trainer.model.named_parameters())
+    #             if p.requires_grad and idx in opt_param_indices
+    #         }
+    #
+    #         name_state_dict = {}
+    #         for param_idx, param_name in zip(opt_param_indices, model_param_name):
+    #             param_size = model_param_size[param_name]
+    #             exp_avg = state_dict["state"][param_idx]["exp_avg"]
+    #             exp_avg_sq = state_dict["state"][param_idx]["exp_avg_sq"]
+    #             assert exp_avg.size() == param_size
+    #             name_state_dict[param_name] = {"exp_avg": exp_avg, "exp_avg_sq": exp_avg_sq}
+    #
+    #         names = [
+    #             n for idx, (n, p) in enumerate(self.trainer.model.named_parameters())
+    #             if p.requires_grad and idx in opt_param_indices
+    #         ]
+    #         avg = torch.cat([name_state_dict[n]["exp_avg"].view(-1) for n in names]).to(self.device)
+    #         avg_sq = torch.cat([name_state_dict[n]["exp_avg_sq"].view(-1) for n in names]).to(self.device)
+    #         return avg, avg_sq, opt_param_indices
+    #     else:
+    #         return opt_param_indices
 
-        proj_grads = []
-        for batch in augment_dataloader:
-            self.trainer.model.zero_grad()
-            loss = self.forward_once(kwargs, batch)
-            vectorized_grads = self.get_gradients(
-                loss,
-                optim_type="adam",
-                avg=prev_avg,
-                avg_sq=prev_avg_sq
-            )
-            proj_grad = projector.project(
-                vectorized_grads,
-                model_id=0
-            )
-            proj_grads.append(proj_grad)
-        proj_grads = torch.stack(proj_grads, dim=0)
-        return proj_grads
+    def merge_grads(self, output_dir, normalize=True):
+        file_list = os.listdir(output_dir)
+        file_list.sort(key=lambda x: int(x.split('.')[0].split('-')[-1]))
+        merged_data = []
+        for file in file_list:
+            data = torch.load(os.path.join(output_dir, file))
+            data = F.normalize(data, dim=1) if normalize else data
+            merged_data.append(data)
+        merged_data = torch.cat(merged_data, dim=0)
+        if normalize:
+            output_path = os.path.join(output_dir, "norm_grads.pt")
+        else:
+            output_path = os.path.join(output_dir, "unorm_grads.pt")
+        torch.save(merged_data, output_path)
 
-    def select_augment_data(self, **model_kwargs):
-        valid_dataloader = self.trainer.get_eval_dataloader()
-        projector = self.get_projector()
-        augment_data_grads = self.collect_grads(model_kwargs)
+    def _collect_grads(
+            self,
+            dataloader,
+            projector,
+            phase,
+            optim_type,
+            model_kwargs,
+            param_indices,
+            prev_avg=None,
+            prev_avg_sq=None
+    ):
+        def _project(full_grads):
+            full_grads = torch.stack(full_grads, dim=0)
+            projected_grads = projector.project(full_grads, model_id=0)
+            return projected_grads
 
-        valid_data_grads = []
-        for batch in valid_dataloader:
-            self.trainer.model.zero_grad()
-            loss = self.forward_once(model_kwargs, batch)
-            vectorized_grads = self.get_gradients(loss, optim_type="sgd")
-            proj_grad = projector.project(
-                vectorized_grads, model_id=0
-            )
-            valid_data_grads.append(proj_grad)
-        valid_data_grads = torch.stack(valid_data_grads, dim=0)
-        influence_score = calculate_influence_score(augment_data_grads, valid_data_grads)
-        _, indices = torch.topk(influence_score, k=self.config.num_augments, dim=0, largest=True)
-        return indices
+        def _save(proj_grads, cnt):
+            proj_grads = torch.cat(proj_grads, dim=0)
+            print(f"Saving gradient at step {cnt}: shape {proj_grads.shape}...", flush=True)
+            output_path = os.path.join(output_dir, f"grads-{cnt}.pt")
+            torch.save(proj_grads, output_path)
+
+        output_dir = os.path.join(self.trainer.saved_dir, f"{phase}-{optim_type}")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        count = 0
+        full_gradients, projected_gradients = [], []
+        for batch in dataloader:
+            count += 1
+            loss = self.trainer.forward_once(model_kwargs, batch)
+            loss.backward()
+            if optim_type == "adam":
+                vectorized_grad = self.obtain_gradients(
+                    optim_type,
+                    param_indices,
+                    avg=prev_avg,
+                    avg_sq=prev_avg_sq
+                )
+            else:
+                vectorized_grad = self.obtain_gradients(optim_type, param_indices)
+            full_gradients.append(vectorized_grad)
+
+            if count % self.config.proj_interval == 0:
+                projected_grad = _project(full_gradients)
+                full_gradients = []
+                projected_gradients.append(projected_grad)
+
+            if count % self.config.save_interval == 0:
+                _save(projected_gradients, count)
+                projected_gradients = []
+
+        if len(full_gradients) > 0:
+            projected_grad = _project(full_gradients)
+            del full_gradients
+            projected_gradients.append(projected_grad)
+            _save(projected_gradients, count)
+            del projected_gradients
+        torch.cuda.empty_cache()
+        self.merge_grads(output_dir, normalize=True)
+
+    def select_augmentation(self, model_kwargs):
+        self.trainer.model.train()
+        augment_dataloader = DataLoader(self.augment_dataset, batch_size=1,
+                                        collate_fn=self.trainer.dataloader_params["collate_fn"])
+        valid_dataloader = DataLoader(self.trainer.eval_dataset, batch_size=1,
+                                      collate_fn=self.trainer.dataloader_params["collate_fn"])
+        # augment_dataloader = self.trainer.get_test_dataloader(self.augment_dataset)
+        # valid_dataloader = self.trainer.get_eval_dataloader()
+
+        prev_avg, prev_avg_sq, param_indices = self.load_optimizer_state("adam")
+        projector = self.get_projector(param_indices)
+
+        augment_grad_path = os.path.join(self.trainer.saved_dir, "train-adam", "norm_grads.pt")
+        eval_grad_path = os.path.join(self.trainer.saved_dir, "eval-sgd", "norm_grads.pt")
+        if not os.path.exists(augment_grad_path):
+            self._collect_grads(augment_dataloader, projector, "train", "adam",
+                                model_kwargs, param_indices, prev_avg, prev_avg_sq)
+        if not os.path.exists(eval_grad_path):
+            self._collect_grads(valid_dataloader, projector, "eval", "sgd", model_kwargs, param_indices)
+        augment_grads, eval_grads = torch.load(augment_grad_path), torch.load(eval_grad_path)
+        augment_grads, eval_grads = prepare_data((augment_grads, eval_grads), self.device)
+        influence_score = calculate_influence_score(augment_grads, eval_grads)
+        _, indices = torch.topk(influence_score.max(dim=-1)[0], k=self.config.num_augments, dim=-1, largest=True)
+        subset = TrajSubset(self.augment_dataset, indices.cpu(), self.augment_dataset.model_name)
+        return subset
+
+    # def select_augment_data(self, model_kwargs):
+    #     valid_dataloader = self.trainer.get_eval_dataloader()
+    #     projector = self.get_projector()
+    #     self.trainer.model.train()
+    #     augment_data_grads = self.collect_grads(model_kwargs)
+    #
+    #     valid_data_grads = []
+    #     for batch in valid_dataloader:
+    #         self.trainer.model.zero_grad()
+    #         loss = self.trainer.forward_once(model_kwargs, batch)
+    #         vectorized_grads = self.get_gradients(loss, optim_type="sgd")
+    #         proj_grad = projector.project(
+    #             vectorized_grads, model_id=0
+    #         )
+    #         valid_data_grads.append(proj_grad.cpu())
+    #     valid_data_grads = torch.stack(valid_data_grads, dim=0)
+    #     torch.cuda.empty_cache()
+    #     augment_data_grads, valid_data_grads = prepare_data((augment_data_grads, valid_data_grads), self.device)
+    #     influence_score = calculate_influence_score(augment_data_grads, valid_data_grads)
+    #     _, indices = torch.topk(influence_score, k=self.config.num_augments, dim=0, largest=True)
+    #     return indices

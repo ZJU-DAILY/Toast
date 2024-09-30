@@ -11,8 +11,9 @@ from torch_geometric.nn import Node2Vec
 from utils.data import SimilarityDataset
 from utils.train import SimilarityTrainer
 from models.similarity_model import ST2Vec, GTS
-from augment.augment_config import PointUnionConfig, TaskType
+from augment.augment_config import PointUnionConfig, TrajUnionConfig, TaskType
 from augment.point_union import PointUnion
+from augment.trajectory_union import TrajUnion
 
 
 def parse_args(args=None):
@@ -27,6 +28,8 @@ def parse_args(args=None):
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
 
+    parser.add_argument("--augment_type", type=str, default="PointUnion")
+    parser.add_argument("--union_ratio", type=float, default=0.05)
     parser.add_argument("--num_virtual_tokens", type=int, default=20)
     parser.add_argument("--num_augment_epochs", type=int, default=20)
     return parser.parse_args()
@@ -89,6 +92,7 @@ def get_graph_features(graph_dir, feat_dim, device):
         model.eval()
         with torch.no_grad():
             node_feats = model(torch.arange(num_nodes, device=device))
+            np.save(graph_dir + "/node_features.npy", node_feats.cpu().numpy())
     return edge_index, node_feats, edge_attr
 
 
@@ -121,7 +125,7 @@ def main():
             "hidden_dim": config["hidden_dim"],
             "num_layers": config["num_layers"],
             "dropout_rate": config["dropout_rate"],
-            "pretrain": False,
+            "pretrain": True,
             "pretrain_model": data_dir + "/d2v_98291_17.169918439404636.pth"
         }
         model = ST2Vec(**model_params).to(device)
@@ -154,27 +158,52 @@ def main():
                       metric_result[2]))
     if (phase is None) or (phase == "test"):
         trainer.load_model()
-        metric_result = trainer.evaluate(test_dataset, node_feats, edge_index)
+        metric_result = trainer.evaluate(test_dataset, node_feats, edge_index, edge_attr)
         print("hr10: {:.4f}\thr50: {:.4f}\thr10_50: {:.4f}\n"
               .format(metric_result[0],
                       metric_result[1],
                       metric_result[2]))
     if (phase is None) or (phase == "augment"):
         trainer.load_model()
-        augment_config = PointUnionConfig(
-            TaskType.TRAJ_SIMILAR,
-            model_name=model_name,
-            virtual_dim=config["feature_dim"],
-            num_virtual_tokens=args.num_virtual_tokens,
-            num_epochs=args.num_augment_epochs
+        model_kwargs = dict(
+            node_feat=node_feats.to(device),
+            edge_index=edge_index.to(device),
+            edge_attr=edge_attr.to(device)
         )
-        augmentor = PointUnion(augment_config, trainer, None, device)
-        augment_result = augmentor.augment_points(
-            test_dataset,
-            node_feat=node_feats,
-            edge_index=edge_index,
-            edge_attr=edge_attr
-        )
+        if args.augment_type == "PointUnion":
+            augment_config = PointUnionConfig(
+                TaskType.TRAJ_SIMILAR,
+                model_name=model_name,
+                virtual_dim=config["feature_dim"],
+                num_virtual_tokens=args.num_virtual_tokens,
+                num_epochs=args.num_augment_epochs
+            )
+            augmentor = PointUnion(augment_config, trainer, None, device)
+            augment_result = augmentor.augment_points(
+                test_dataset,
+                **model_kwargs
+            )
+        elif args.augment_type == "TrajUnion":
+            augment_config = TrajUnionConfig(
+                task_type=TaskType.TRAJ_SIMILAR,
+                model_name=model_name,
+                num_augments=int(args.union_ratio * len(train_dataset))
+            )
+            augmentor = TrajUnion(
+                config=augment_config,
+                trainer=trainer,
+                augment_dataset=train_dataset,
+                device=device
+            )
+            augment_indices = augmentor.select_augmentation(model_kwargs)
+            trainer.train_dataset = train_dataset[augment_indices]
+            trainer.train(**model_kwargs)
+            augment_result = trainer.evaluate(
+                test_dataset,
+                **model_kwargs
+            )
+        else:
+            raise NotImplementedError("Please specify the way of data augmentation.")
         print("hr10: {:.4f}\thr50: {:.4f}\thr10_50: {:.4f}\n"
               .format(augment_result[0],
                       augment_result[1],

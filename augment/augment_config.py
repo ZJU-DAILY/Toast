@@ -40,7 +40,10 @@ class TrajUnionConfig:
             model_name: str,
             num_augments,
             proj_type=ProjectionType.rademacher,
-            proj_dim=8192,
+            proj_dim=2048,
+            gradient_type="adam",
+            proj_interval=16,
+            save_interval=50,
             beta1=0.9,
             beta2=0.999,
             eps=1e-8
@@ -50,6 +53,9 @@ class TrajUnionConfig:
         self.num_augments = num_augments
         self.proj_type = proj_type
         self.proj_dim = proj_dim
+        self.gradient_type = gradient_type
+        self.proj_interval = proj_interval
+        self.save_interval = save_interval
         self.beta1 = beta1
         self.beta2 = beta2
         self.eps = eps

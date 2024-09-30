@@ -157,6 +157,61 @@ class RecoveryTrainer(Trainer):
         mae, rmse = evaluate_distance_regression(pred_node, pred_rate, true_position, seq_len, road_net)
         return acc, prec, recall, f1, mae, rmse
 
+    def forward_once(self, model_kwargs, batch, augment_fn=None):
+        road_feats, tf_ratio, weights = model_kwargs["road_feat"], model_kwargs["tf_ratio"], model_kwargs["weights"]
+        road_feats = road_feats.to(self.device)
+        src_grid_seq, src_gps_seq, feat_seq, src_seq_len, \
+        tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, \
+        batched_graph, node_index = batch
+        src_grid_seq, src_gps_seq, feat_seq = src_grid_seq.to(self.device), \
+                                              src_gps_seq.to(self.device), \
+                                              feat_seq.to(self.device)
+        tgt_gps_seq, tgt_node_seq, tgt_rate_seq, tgt_inf_scores = tgt_gps_seq.to(self.device), \
+                                                                  tgt_node_seq.to(self.device), \
+                                                                  tgt_rate_seq.to(self.device), \
+                                                                  tgt_inf_scores.to(self.device)
+        if self.train_dataset.model_name == "RNTrajRec":
+            road_len = model_kwargs["road_len"]
+            road_grid, road_nodes = model_kwargs["road_grid"], model_kwargs["road_nodes"]
+            road_edge, road_batch = model_kwargs["road_edge"], model_kwargs["road_batch"]
+            batched_graph, node_index = batched_graph.to(self.device), node_index.to(self.device)
+            traj_edge, tgt_node_seq = batched_graph.edge_index.long(), tgt_node_seq.long()
+
+            road_embed = self.model.extract_feat(road_grid, road_len, road_nodes, road_edge, road_batch)
+            sequences, hiddens, logits = self.model.encoding(
+                road_embed, src_grid_seq, src_seq_len,
+                feat_seq, node_index, traj_edge,
+                batched_graph.batch, batched_graph.weight
+            )
+            if augment_fn is not None:
+                sequences, src_seq_len = augment_fn(sequences, src_seq_len)
+            pred_node, pred_rate = self.model.decoding(
+                sequences, hiddens, road_embed, road_feats, src_seq_len,
+                tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio
+            )
+            gt = batched_graph.gt
+        else:
+            sequences, hiddens = self.model.encoding(src_grid_seq, src_seq_len, feat_seq)
+            if augment_fn is not None:
+                sequences, src_seq_len = augment_fn(sequences, src_seq_len)
+            pred_node, pred_rate = self.model.decoding(
+                sequences, hiddens, road_feats,
+                src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio
+            )
+            logits, gt = None, None
+        num_pred_node = pred_node.size(2)
+        pred_rate = pred_rate.squeeze(-1)[:, 1:]
+        pred_node = pred_node.permute(1, 0, 2)[1:]
+        pred_node = pred_node.reshape(-1, num_pred_node)  # ((len - 1) * batch_size, node_size)
+        pred_rate = pred_rate.permute(1, 0)  # ((len - 1), batch_size)
+
+        true_node, true_rate = tgt_node_seq.squeeze(-1)[:, 1:], tgt_rate_seq.squeeze(-1)[:, 1:]
+        true_node = true_node.permute(1, 0).reshape(-1)
+        true_rate = true_rate.permute(1, 0)
+        loss = self.compute_loss(pred_node, pred_rate, logits, true_node, true_rate, gt,
+                                 src_seq_len, tgt_seq_len, weights)
+        return loss
+
     def train(
             self,
             road_grid: Optional[torch.Tensor] = None,
@@ -167,7 +222,7 @@ class RecoveryTrainer(Trainer):
             road_feat: Optional[torch.Tensor] = None,
             road_net: Optional[SegmentCentricRoadNetwork] = None,
             weights: Optional[List[float]] = None,
-            decay_param: Optional[float] = None,
+            decay_param: Optional[float] = 0.9,
             tf_ratio: float = 0.
     ):
         road_feat = road_feat.to(self.device)

@@ -51,6 +51,50 @@ class SimilarityTrainer(Trainer):
         loss = (pos_loss + neg_loss).mean()
         return loss
 
+    def forward_once(self, model_kwargs, batch, augment_fn=None):
+        node_feat, edge_index, edge_attr = (
+            model_kwargs["node_feat"], model_kwargs["edge_index"], model_kwargs["edge_attr"]
+        )
+        if self.train_dataset.model_name == "ST2Vec":
+            a_nodes, a_time, a_len, p_nodes, p_time, p_len, n_nodes, n_time, n_len, pos_dist, neg_dist = batch
+            a_nodes, a_time = a_nodes.to(self.device), a_time.to(self.device)
+            p_nodes, p_time = p_nodes.to(self.device), p_time.to(self.device)
+            n_nodes, n_time = n_nodes.to(self.device), n_time.to(self.device)
+            pos_dist, neg_dist = pos_dist.to(self.device), neg_dist.to(self.device)
+            spatial_embeds,time_embeds = self.model.extract_feat(
+                a_nodes, a_time, a_len, node_feat, edge_index, edge_attr
+            )
+            if augment_fn:
+                spatial_embeds, augment_len = augment_fn(
+                    spatial_embeds, a_len
+                )
+                time_embeds, _ = augment_fn(
+                    time_embeds, a_len
+                )
+            else:
+                augment_len = a_len
+            a_embeds = self.model.encoding(spatial_embeds, time_embeds, augment_len)
+            p_embeds = self.model(p_nodes, p_time, p_len, node_feat, edge_index, edge_attr)
+            n_embeds = self.model(n_nodes, n_time, n_len, node_feat, edge_index, edge_attr)
+        else:
+            a_nodes, _, a_len, p_nodes, _, p_len, n_nodes, _, n_len, pos_dist, neg_dist = batch
+            a_nodes, p_nodes, n_nodes = a_nodes.to(self.device), p_nodes.to(self.device), n_nodes.to(self.device)
+            pos_dist, neg_dist = pos_dist.to(self.device), neg_dist.to(self.device)
+            spatial_embeds = self.model.extract_feat(
+                a_nodes, a_len, node_feat, edge_index, edge_attr
+            )
+            if augment_fn:
+                spatial_embeds, augment_len = augment_fn(
+                    spatial_embeds, a_len
+                )
+            else:
+                augment_len = a_len
+            a_embeds = self.model.encoding(spatial_embeds, augment_len)
+            p_embeds = self.model(p_nodes, p_len, node_feat, edge_index, edge_attr)
+            n_embeds = self.model(n_nodes, n_len, node_feat, edge_index, edge_attr)
+        loss = self.compute_loss(a_embeds, p_embeds, n_embeds, pos_dist, neg_dist)
+        return loss
+
     def train(
             self,
             node_feat: Optional[torch.Tensor] = None,
@@ -139,7 +183,7 @@ class SimilarityTrainer(Trainer):
             test_dataset: Dataset = None,
             node_feat=None,
             edge_index=None,
-            edge_feat=None
+            edge_attr=None
     ):
         if test_dataset is None:
             eval_loader = self.get_eval_dataloader()
@@ -151,17 +195,17 @@ class SimilarityTrainer(Trainer):
         self.model.eval()
         edge_index = None if edge_index is None else edge_index.to(self.device)
         node_feat = None if node_feat is None else node_feat.to(self.device)
-        edge_feat = None if edge_feat is None else edge_feat.to(self.device)
+        edge_attr = None if edge_attr is None else edge_attr.to(self.device)
         embeddings, true_dist = [], []
         for batch in tqdm.tqdm(eval_loader, total=len(eval_loader), desc=mode):
             if self.train_dataset.model_name == "ST2Vec":
                 nodes, time, seq_len, dist = batch
                 nodes, time = nodes.to(self.device), time.to(self.device)
-                batch_embeds = self.model(nodes, time, seq_len, node_feat, edge_index, edge_feat)
+                batch_embeds = self.model(nodes, time, seq_len, node_feat, edge_index, edge_attr)
             else:
                 nodes, _, seq_len, dist = batch
                 nodes = nodes.to(self.device)
-                batch_embeds = self.model(nodes, seq_len, node_feat, edge_index, edge_feat)
+                batch_embeds = self.model(nodes, seq_len, node_feat, edge_index, edge_attr)
             embeddings.append(batch_embeds)
             true_dist.append(dist)
         embeddings = torch.cat(embeddings, dim=0)

@@ -49,6 +49,9 @@ class PredictTrainer(Trainer):
         loss = regression_criterion(pred_flow, true_flow)
         return loss
 
+    def forward_once(self, model_kwargs, batch, augment_fn=None):
+        pass
+
     def train(self, edge_index, scaler):
         train_loader = self.get_train_dataloader()
         edge_index = None if edge_index is None else edge_index.to(self.device)
