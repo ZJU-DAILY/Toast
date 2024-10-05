@@ -4,7 +4,9 @@ import json
 import random
 import numpy as np
 import pandas as pd
+import pickle as pkl
 import torch
+from torch.utils.data import Dataset
 from torch.optim import AdamW
 from torch_geometric.nn import Node2Vec
 
@@ -41,6 +43,59 @@ def set_random_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+class ValidSet(Dataset):
+    model_name = None
+
+    def __init__(self, node_data, time_data, seq_len, dist_data, model_name):
+        super(ValidSet, self).__init__()
+        self.node_data = node_data
+        self.time_data = time_data
+        self.seq_len = seq_len
+        self.dist_data = dist_data
+        ValidSet.model_name = model_name
+
+    def __len__(self):
+        assert len(self.node_data) == len(self.time_data) == len(self.seq_len) == len(self.dist_data), \
+            f"{len(self.node_data)}\t{len(self.time_data)}\t{len(self.seq_len)}\t{len(self.dist_data)}\n"
+        return len(self.node_data)
+
+    def __getitem__(self, item):
+        return (
+            torch.tensor(self.node_data[item][0], dtype=torch.long).unsqueeze(dim=1),
+            torch.tensor(self.time_data[item][0], dtype=torch.float),
+            torch.tensor(self.seq_len[item][0], dtype=torch.long),
+            torch.tensor(self.node_data[item][1], dtype=torch.long).unsqueeze(dim=1),
+            torch.tensor(self.time_data[item][1], dtype=torch.float),
+            torch.tensor(self.seq_len[item][1], dtype=torch.long),
+            torch.tensor(self.node_data[item][2], dtype=torch.long).unsqueeze(dim=1),
+            torch.tensor(self.time_data[item][2], dtype=torch.float),
+            torch.tensor(self.seq_len[item][2], dtype=torch.long),
+            torch.tensor(self.dist_data[item][0], dtype=torch.float),
+            torch.tensor(self.dist_data[item][1], dtype=torch.float)
+        )
+
+
+def prepare_valid_set(traj_dir, gt_dir, model_name):
+    node_triple_path = os.path.join(traj_dir, f"triplet/TP/{model_name}/node_triplets_valid")
+    with open(node_triple_path, "rb") as n_file:
+        node_triples = pkl.load(n_file)
+    dist_triple_path = os.path.join(gt_dir, f"TP/{model_name}/valid_triplet_2w_STBall.npy")
+    dist_data = np.load(dist_triple_path, allow_pickle=True)
+    time_triple_path = os.path.join(traj_dir, f"triplet/TP/{model_name}/d2vec_triplets_valid")
+    with open(time_triple_path, "rb") as t_file:
+        transform_time_triples = pkl.load(t_file)
+    seq_len_triples = []
+    for nodes, times in zip(node_triples, transform_time_triples):
+        a_nseq, p_nseq, n_nseq = nodes
+        a_tseq, p_tseq, n_tseq = times
+        assert len(a_nseq) == len(a_tseq)
+        seq_len = [len(a_tseq), len(p_tseq), len(n_tseq)]
+        seq_len_triples.append(seq_len)
+
+    valid_set = ValidSet(node_triples, transform_time_triples, seq_len_triples, dist_data, model_name)
+    return valid_set
 
 
 def get_graph_features(graph_dir, feat_dim, device):
@@ -184,6 +239,8 @@ def main():
                 **model_kwargs
             )
         elif args.augment_type == "TrajUnion":
+            valid_set = prepare_valid_set(data_dir, gt_dir, model_name)
+            trainer.eval_dataset = valid_set
             augment_config = TrajUnionConfig(
                 task_type=TaskType.TRAJ_SIMILAR,
                 model_name=model_name,
@@ -195,8 +252,10 @@ def main():
                 augment_dataset=train_dataset,
                 device=device
             )
-            augment_indices = augmentor.select_augmentation(model_kwargs)
-            trainer.train_dataset = train_dataset[augment_indices]
+            train_subset = augmentor.select_augmentation(model_kwargs)
+            trainer.train_dataset = train_subset
+            trainer.eval_dataset = valid_dataset
+            trainer.saved_dir = os.path.join(ckpt_dir, "traj_union")
             trainer.train(**model_kwargs)
             augment_result = trainer.evaluate(
                 test_dataset,
@@ -205,9 +264,7 @@ def main():
         else:
             raise NotImplementedError("Please specify the way of data augmentation.")
         print("hr10: {:.4f}\thr50: {:.4f}\thr10_50: {:.4f}\n"
-              .format(augment_result[0],
-                      augment_result[1],
-                      augment_result[2]))
+              .format(augment_result[0], augment_result[1], augment_result[2]))
 
 
 if __name__ == "__main__":

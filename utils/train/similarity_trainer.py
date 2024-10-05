@@ -134,7 +134,7 @@ class SimilarityTrainer(Trainer):
                 loss.backward()
                 self.optimizer.step()
 
-            results = self.evaluate(node_feat=node_feat, edge_index=edge_index, edge_feat=edge_attr)
+            results = self.evaluate(node_feat=node_feat, edge_index=edge_index, edge_attr=edge_attr)
             if self.saved_dir is not None:
                 if results[0] > best_hr10:
                     print("saving best model.")
