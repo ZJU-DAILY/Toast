@@ -16,7 +16,7 @@ from models.prediction_model import STMetaNet, STResNet
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="traffic flow prediction")
     parser.add_argument("--dataset", type=str, default="Beijing")
-    parser.add_argument("--model_type", type=str, default="STMetaNet")
+    parser.add_argument("--model_name", type=str, default="STMetaNet")
     parser.add_argument("--num_epochs", type=int, default=20, help="epochs")
     parser.add_argument("--batch_size", type=int, default=64, help="batch size")
     parser.add_argument("--phase", type=str, default=None, help="select from `train`, `test`, `augment`")
@@ -65,20 +65,20 @@ def main():
     set_random_seed(args.seed)
     device = torch.device("cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu")
     data_dir = os.path.join("./data", args.dataset)
-    model_type = args.model_type
+    model_name = args.model_name
     phase = args.phase
     with open("configs/predict_config.json", 'r') as config_file:
         configs = json.load(config_file)
-        config = configs[model_type]
+        config = configs[model_name]
     feat_dim = config["feat_dim"]
-    ckpt_dir = f"./ckpt/{model_type}-{args.dataset}-{feat_dim}-tu" if args.saved_path is None else args.saved_path
+    ckpt_dir = f"./ckpt/{model_name}-{args.dataset}-{feat_dim}-tu" if args.saved_path is None else args.saved_path
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
 
     features = read_feature(data_dir, config["feat_dim"])
     graph = read_graph(data_dir)
 
-    if model_type == "STMetaNet":
+    if model_name == "STMetaNet":
         dataset_config = {
             "input_len": config["input_len"],
             "output_len": config["output_len"],
@@ -91,11 +91,11 @@ def main():
             "period_interval": config["period_interval"],
             "trend_interval": config["trend_interval"]
         }
-    train_dataset = PredictDataset(data_dir, features=features, mode="train", model_name=model_type, **dataset_config)
-    valid_dataset = PredictDataset(data_dir, features=features, mode="valid", model_name=model_type, **dataset_config)
-    test_dataset = PredictDataset(data_dir, features=features, mode="test", model_name=model_type, **dataset_config)
+    train_dataset = PredictDataset(data_dir, features=features, mode="train", model_name=model_name, **dataset_config)
+    valid_dataset = PredictDataset(data_dir, features=features, mode="valid", model_name=model_name, **dataset_config)
+    test_dataset = PredictDataset(data_dir, features=features, mode="test", model_name=model_name, **dataset_config)
 
-    if model_type == "STMetaNet":
+    if model_name == "STMetaNet":
         model_params = {
             "input_dim": config["input_dim"],
             "output_dim": config["output_dim"],
