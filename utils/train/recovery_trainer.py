@@ -122,6 +122,7 @@ class RecoveryTrainer(Trainer):
             num_workers: int,
             pin_memory: bool,
             device: Union[torch.device, str] = "cpu",
+            mixup: bool = False,
             **kwargs
     ):
         super(RecoveryTrainer, self).__init__(model,
@@ -135,7 +136,8 @@ class RecoveryTrainer(Trainer):
                                               shuffle=shuffle,
                                               num_workers=num_workers,
                                               pin_memory=pin_memory,
-                                              device=device)
+                                              device=device,
+                                              mixup=mixup)
         for key, val in kwargs.items():
             setattr(self, key, val)
 
@@ -151,6 +153,40 @@ class RecoveryTrainer(Trainer):
             return node_loss + rate_loss * weights[0] + enc_loss * weights[1]
         else:
             return node_loss + rate_loss * weights[0]
+        
+    def compute_mixup_loss(
+            self, 
+            pred_node, 
+            pred_rate, 
+            pred_logit, 
+            true_node_a, 
+            true_rate_a, 
+            true_logit_a,
+            true_node_b, 
+            true_rate_b, 
+            true_logit_b,
+            src_len, 
+            tgt_len, 
+            weights,
+            lam
+    ):
+        regression_criterion = nn.MSELoss(reduction="sum")
+        classification_criterion = nn.NLLLoss(reduction="sum")
+
+        node_loss_a = classification_criterion(pred_node, true_node_a) / tgt_len.sum()
+        rate_loss_a = regression_criterion(pred_rate, true_rate_a) / tgt_len.sum()
+        node_loss_b = classification_criterion(pred_node, true_node_b) / tgt_len.sum()
+        rate_loss_b = regression_criterion(pred_rate, true_rate_b) / tgt_len.sum()
+        node_loss = lam * node_loss_a + (1 - lam) * node_loss_b
+        rate_loss = lam * rate_loss_b + (1 - lam) * rate_loss_b
+        if pred_logit is not None:
+            enc_loss_a = -1 * (pred_logit.squeeze(-1) * true_logit_a).sum() / src_len.sum()
+            enc_loss_b = -1 * (pred_logit.squeeze(-1) * true_logit_b).sum() / src_len.sum()
+            enc_loss = lam * enc_loss_a + (1 - lam) * enc_loss_b
+            return node_loss + rate_loss * weights[0] + enc_loss * weights[1]
+        else:
+            return node_loss + rate_loss * weights[0]
+        pass
 
     def compute_metrics(self, pred_node, pred_rate, true_node, true_position, seq_len, road_net):
         acc, prec, recall, f1 = evaluate_point_prediction(pred_node, true_node, seq_len)
@@ -185,6 +221,14 @@ class RecoveryTrainer(Trainer):
             )
             if augment_fn is not None:
                 sequences, src_seq_len = augment_fn(sequences, src_seq_len)
+            if self.mixup:
+                mixed_data, target_a, target_b, lam = self.mixup_data(
+                    (sequences, hiddens, logits),
+                    (tgt_node_seq, tgt_rate_seq, batched_graph.gt)
+                )
+                sequences, hiddens, logits = mixed_data
+                tgt_node_seq_a, tgt_rate_seq_a, gt_a = target_a
+                tgt_node_seq_b, tgt_rate_seq_b, gt_b = target_b
             pred_node, pred_rate = self.model.decoding(
                 sequences, hiddens, road_embed, road_feats, src_seq_len,
                 tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio

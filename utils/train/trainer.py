@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Union
 import os
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -16,6 +16,7 @@ class Trainer:
             optimizer: Optimizer,
             num_epochs: int,
             data_collator: Callable,
+            mixup: bool,
             saved_dir: str,
             **kwargs
     ):
@@ -25,6 +26,7 @@ class Trainer:
         self.optimizer = optimizer
         self.num_epochs = num_epochs
         self.saved_dir = saved_dir
+        self.mixup = mixup
         self.device = kwargs["device"]
         self.dataloader_params = {
             "batch_size": kwargs["batch_size"],
@@ -52,6 +54,52 @@ class Trainer:
             *args
     ):
         raise NotImplementedError
+    
+    def mixup_data(
+            self, 
+            x: Union[torch.Tensor, tuple], 
+            y: Union[torch.Tensor, tuple], 
+            alpha=1.0
+    ):
+        """
+        Applies the Mixup data augmentation technique to the input data.
+
+        Mixup is a data augmentation technique that creates new training examples 
+        by combining pairs of examples from the original dataset. This is done by 
+        taking a weighted average of the input features and the corresponding labels.
+
+        Args:
+            x (Union[torch.Tensor, tuple]): Input data, can be a tensor or a tuple of tensors.
+            y (Union[torch.Tensor, tuple]): Corresponding labels, can be a tensor or a tuple of tensors.
+            alpha (float, optional): Parameter for the Beta distribution to sample the mixup ratio. Default is 1.0.
+
+        Returns:
+            mixed_x (Union[torch.Tensor, tuple]): Mixed input data.
+            y_a (Union[torch.Tensor, tuple]): Original labels.
+            y_b (Union[torch.Tensor, tuple]): Labels of the mixed examples.
+            lam (float): Mixup ratio.
+        """
+        if alpha > 0:
+            lam = torch.distributions.Beta(alpha, alpha).sample().item()
+        else:
+            lam = 1.0
+
+        if isinstance(x, tuple):
+            batch_size = x[0].shape[0]
+            mixed_x, y_a, y_b = (), (), ()
+        else:
+            batch_size = x.shape[0]
+            mixed_x, y_a, y_b = None, None, None
+        index = torch.randperm(batch_size).to(x.device)
+        if isinstance(x, tuple):
+            for i in range(len(x)):
+                mixed_x += (lam * x[i] + (1 - lam) * x[i][index],)
+                y_a += (y[i],)
+                y_b += (y[i][index],)
+        else:
+            mixed_x = lam * x + (1 - lam) * x[index]
+            y_a, y_b = y, y[index]
+        return mixed_x, y_a, y_b, lam
 
     def get_train_dataloader(self):
         return DataLoader(self.train_dataset, **self.dataloader_params)

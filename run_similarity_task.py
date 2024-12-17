@@ -2,6 +2,7 @@ import argparse
 import os
 import json
 import random
+import time
 import numpy as np
 import pandas as pd
 import pickle as pkl
@@ -252,7 +253,10 @@ def main():
                 augment_dataset=train_dataset,
                 device=device
             )
+            begin_time = time.time()
             train_subset = augmentor.select_augmentation(model_kwargs)
+            end_time = time.time()
+            print(f"TrajUnion takes {end_time - begin_time:.4f} s.")
             trainer.train_dataset = train_subset
             trainer.eval_dataset = valid_dataset
             trainer.saved_dir = os.path.join(ckpt_dir, "traj_union")
