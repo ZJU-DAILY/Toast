@@ -25,6 +25,7 @@ def parse_args(args=None):
     parser.add_argument("--saved_path", type=str, default=None, help="model checkpoint")
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
+    parser.add_argument("--mixup", action="store_true")
 
     parser.add_argument("--augment_type", type=str, default="PointUnion")
     parser.add_argument("--union_ratio", type=float, default=0.05)
@@ -65,7 +66,7 @@ def main():
     type_path = "wayTypeOSM.txt"
     zone_range = [41.111975, -8.667057, 41.177462, -8.585305]
     model_name = args.model_name
-    ckpt_dir = f"./ckpt/{model_name}-" + args.dataset if args.saved_path is None else args.saved_path
+    ckpt_dir = f"./ckpt/{model_name}-mixup-" + args.dataset if args.saved_path is None else args.saved_path
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
     with open("configs/recovery_config.json", 'r') as config_file:
@@ -126,7 +127,8 @@ def main():
                               shuffle=config["shuffle"],
                               num_workers=8,
                               pin_memory=True,
-                              device=device)
+                              device=device,
+                              mixup=args.mixup)
     if (phase is None) or (phase == "train"):
         if model_name == "RNTrajRec":
             trainer.train(
@@ -141,6 +143,20 @@ def main():
                 decay_param=config["decay_ratio"],
                 tf_ratio=config["tf_ratio"]
             )
+            if args.mixup:
+                trainer.mixup = True
+                trainer.mixup_train(
+                    road_grid=road_grid,
+                    road_len=road_len,
+                    road_nodes=road_node_index,
+                    road_edge=subgraph.edge_index,
+                    road_batch=subgraph.batch,
+                    road_feat=road_feat,
+                    road_net=road_net,
+                    weights=[config["lambda1"], config["lambda2"]],
+                    decay_param=config["decay_ratio"],
+                    tf_ratio=config["tf_ratio"]
+                )
             metric_result = trainer.evaluate(
                 test_dataset=test_dataset,
                 road_grid=road_grid,
