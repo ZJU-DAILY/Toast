@@ -26,6 +26,7 @@ class SimilarityTrainer(Trainer):
             num_workers: int,
             pin_memory: bool,
             device: Union[str, torch.device] = "cpu",
+            mixup: bool = False,
             **kwargs
     ):
         super(SimilarityTrainer, self).__init__(model,
@@ -34,6 +35,7 @@ class SimilarityTrainer(Trainer):
                                                 optimizer,
                                                 num_epochs,
                                                 data_collator,
+                                                mixup,
                                                 saved_dir,
                                                 batch_size=batch_size,
                                                 shuffle=shuffle,
@@ -50,6 +52,28 @@ class SimilarityTrainer(Trainer):
         neg_loss = neg_dist * ((neg_dist - neg_embed_dist) ** 2)
         loss = (pos_loss + neg_loss).mean()
         return loss
+    
+    def compute_mixup_loss(
+            self, 
+            anchors, 
+            positives, 
+            negatives, 
+            pos_dist_a, 
+            neg_dist_a, 
+            pos_dist_b, 
+            neg_dist_b, 
+            lam
+        ):
+        pos_embed_dist = torch.exp(-torch.norm(anchors - positives, p=2, dim=-1))
+        neg_embed_dist = torch.exp(-torch.norm(anchors - negatives, p=2, dim=-1))
+        pos_loss_a = pos_dist_a * ((pos_dist_a - pos_embed_dist) ** 2)
+        pos_loss_b = pos_dist_b * ((pos_dist_b - pos_embed_dist) ** 2)
+        pos_loss = lam * pos_loss_a + (1 - lam) * pos_loss_b
+        neg_loss_a = neg_dist_a * ((neg_dist_a - neg_embed_dist) ** 2)
+        neg_loss_b = neg_dist_b * ((neg_dist_b - neg_embed_dist) ** 2)
+        neg_loss = lam * neg_loss_a + (1 - lam) * neg_loss_b
+        loss = (pos_loss + neg_loss).mean()
+        return loss
 
     def forward_once(self, model_kwargs, batch, augment_fn=None):
         node_feat, edge_index, edge_attr = (
@@ -61,7 +85,7 @@ class SimilarityTrainer(Trainer):
             p_nodes, p_time = p_nodes.to(self.device), p_time.to(self.device)
             n_nodes, n_time = n_nodes.to(self.device), n_time.to(self.device)
             pos_dist, neg_dist = pos_dist.to(self.device), neg_dist.to(self.device)
-            spatial_embeds,time_embeds = self.model.extract_feat(
+            spatial_embeds, time_embeds = self.model.extract_feat(
                 a_nodes, a_time, a_len, node_feat, edge_index, edge_attr
             )
             if augment_fn:
@@ -92,8 +116,51 @@ class SimilarityTrainer(Trainer):
             a_embeds = self.model.encoding(spatial_embeds, augment_len)
             p_embeds = self.model(p_nodes, p_len, node_feat, edge_index, edge_attr)
             n_embeds = self.model(n_nodes, n_len, node_feat, edge_index, edge_attr)
-        loss = self.compute_loss(a_embeds, p_embeds, n_embeds, pos_dist, neg_dist)
+        if self.mixup:
+            mixed_data, dist_a, dist_b, lam = self.mixup_data(
+                (a_embeds, p_embeds, n_embeds),
+                (pos_dist, neg_dist),
+            )
+            a_embeds, p_embeds, n_embeds = mixed_data
+            pos_dist_a, neg_dist_a = dist_a
+            pos_dist_b, neg_dist_b = dist_b
+            loss = self.compute_mixup_loss(
+                a_embeds, p_embeds, n_embeds, pos_dist_a, neg_dist_a, pos_dist_b, neg_dist_b, lam
+            )
+        else:
+            loss = self.compute_loss(a_embeds, p_embeds, n_embeds, pos_dist, neg_dist)
         return loss
+    
+    def mixup_train(
+            self,
+            node_feat: Optional[torch.Tensor] = None,
+            edge_index: Optional[torch.Tensor] = None,
+            edge_attr: Optional[torch.Tensor] = None,
+    ):
+        train_loader = self.get_train_dataloader()
+        model_kwargs = {
+            "node_feat": node_feat.to(self.device), 
+            "edge_index": edge_index.to(self.device), 
+            "edge_attr": edge_attr.to(self.device)
+        }
+        best_hr10 = float("-inf")
+        for epoch in range(self.num_epochs):
+            print("[start {}-th training]".format(epoch + 1))
+            self.model.train()
+            for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
+                self.optimizer.zero_grad()
+                loss = self.forward_once(model_kwargs, batch, augment_fn=None)
+                loss.backward()
+                self.optimizer.step()
+
+            results = self.evaluate(node_feat=node_feat, edge_index=edge_index, edge_attr=edge_attr)
+            if self.saved_dir is not None:
+                if results[0] > best_hr10:
+                    print("saving best model.")
+                    best_hr10 = results[0]
+                    self.save_model(save_optim=True)
+            if (epoch + 1) % 5 == 0:
+                print("valid hr10: {:.4f}".format(results[0]))
 
     def train(
             self,

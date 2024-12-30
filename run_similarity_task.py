@@ -30,6 +30,7 @@ def parse_args(args=None):
     parser.add_argument("--saved_path", type=str, default=None, help="model checkpoint")
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
+    parser.add_argument("--mixup", action="store_true", help="mixup data augmentation")
 
     parser.add_argument("--augment_type", type=str, default="PointUnion")
     parser.add_argument("--union_ratio", type=float, default=0.05)
@@ -204,9 +205,12 @@ def main():
                                 shuffle=config["shuffle"],
                                 num_workers=8,
                                 pin_memory=True,
-                                device=device)
+                                device=device,
+                                mixup=args.mixup)
     if (phase is None) or (phase == "train"):
         trainer.train(node_feats, edge_index, edge_attr)
+        if args.mixup:
+            trainer.mixup_train(node_feats, edge_index, edge_attr)
         metric_result = trainer.evaluate(test_dataset, node_feats, edge_index, edge_attr)
         print("hr10: {:.4f}\thr50: {:.4f}\thr10_50: {:.4f}\n"
               .format(metric_result[0],
