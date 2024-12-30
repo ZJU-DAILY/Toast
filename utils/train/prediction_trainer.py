@@ -26,6 +26,7 @@ class PredictTrainer(Trainer):
             num_workers: int,
             pin_memory: bool,
             device: Union[str, torch.device] = "cpu",
+            mixup: bool = False,
             **kwargs
     ):
         super(PredictTrainer, self).__init__(model,
@@ -34,6 +35,7 @@ class PredictTrainer(Trainer):
                                              optimizer,
                                              num_epochs,
                                              data_collator,
+                                             mixup,
                                              saved_dir,
                                              batch_size=batch_size,
                                              shuffle=shuffle,
@@ -48,9 +50,79 @@ class PredictTrainer(Trainer):
 
         loss = regression_criterion(pred_flow, true_flow)
         return loss
+    
+    def compute_mixup_loss(
+            self,
+            pred_flow,
+            true_flow_a,
+            true_flow_b,
+            lam,
+    ):
+        regression_criterion = nn.MSELoss(reduction="mean")
+        loss = lam * regression_criterion(pred_flow, true_flow_a) + (1 - lam) * regression_criterion(pred_flow, true_flow_b)
+        return loss
 
     def forward_once(self, model_kwargs, batch, augment_fn=None):
-        pass
+        if self.train_dataset.model_name == "STMetaNet":
+            flow, features, labels = batch
+            flow, features, labels = flow.to(self.device), features.to(self.device), labels.to(self.device)
+            if self.mixup:
+                flow, labels_a, labels_b, lam = self.mixup_data(flow, labels)
+                labels_a, labels_b = labels_a.permute(2, 0, 1, 3), labels_b.permute(2, 0, 1, 3)
+            predicts, labels = self.model(flow, features, labels, model_kwargs["edge_index"], train_mode=True)
+            if self.mixup:
+                loss = self.compute_mixup_loss(predicts, labels_a, labels_b, lam)
+            else:
+                loss = self.compute_loss(predicts, labels)
+        else:
+            close_data, period_data, trend_data, features, labels = batch
+            close_data, period_data, trend_data, features, labels = (
+                close_data.to(self.device),
+                period_data.to(self.device),
+                trend_data.to(self.device),
+                features.to(self.device),
+                labels.to(self.device)
+            )
+            if self.mixup:
+                data, labels_a, labels_b = self.mixup_data(
+                    (close_data, period_data, trend_data),
+                    (labels, )
+                )
+                close_data, period_data, trend_data = data
+                labels_a, labels_b = labels_a[0], labels_b[0]
+            predicts = self.model(close_data, period_data, trend_data, features)
+            if self.mixup:
+                loss = self.compute_mixup_loss(predicts, labels_a, labels_b, lam)
+            else:
+                loss = self.compute_loss(predicts, labels)
+        return loss
+    
+    def mixup_train(
+            self, 
+            edge_index=None, 
+            scaler=None,
+    ):
+        train_loader = self.get_train_dataloader()
+        model_kwargs = dict(
+            edge_index=None if edge_index is None else edge_index.to(self.device)
+        )
+        min_rmse = float("inf")
+        for epoch in range(self.num_epochs):
+            print("[start {}-th training]".format(epoch + 1))
+            self.model.train()
+            for batch in tqdm.tqdm(train_loader, total=len(self.train_loader), desc="train"):
+                self.optimizer.zero_grad()
+                loss = self.forward_once(model_kwargs, batch)
+                loss.backward()
+                self.optimizer.step()
+            results = self.evaluate(edge_index=edge_index, scaler=scaler)
+            if self.saved_dir is not None:
+                if results[0] < self.min_rmse:
+                    print("saving best model.")
+                    self.min_rmse = results[0]
+                    self.save_model(save_optim=True)
+            if (epoch + 1) % 5 == 0:
+                print("valid rmse: {:.4f}".format(results[-1]))
 
     def train(self, edge_index, scaler):
         train_loader = self.get_train_dataloader()

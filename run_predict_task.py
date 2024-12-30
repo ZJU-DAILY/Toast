@@ -23,6 +23,7 @@ def parse_args(args=None):
     parser.add_argument("--saved_path", type=str, default=None, help="model checkpoint")
     parser.add_argument("--gpu", type=int, default=0, help="gpu device")
     parser.add_argument("--seed", type=int, default=2024, help="random seed")
+    parser.add_argument("--mixup", action="store_true", help="mixup data augmentation")
     return parser.parse_args()
 
 
@@ -122,9 +123,12 @@ def main():
                              shuffle=config["shuffle"],
                              num_workers=8,
                              pin_memory=True,
-                             device=device)
+                             device=device,
+                             mixup=args.mixup)
     if (phase is None) or (phase == "train"):
         trainer.train(edge_index=graph.edge_index, scaler=PredictDataset.scaler)
+        if args.mixup:
+            trainer.mixup_train(edge_index=graph.edge_index, scaler=PredictDataset.scaler)
         metric_result = trainer.evaluate(test_dataset, graph.edge_index, PredictDataset.scaler)
         print("rsme: {:.4f}\tmae: {:.4f}\n"
               .format(metric_result[0],
