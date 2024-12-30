@@ -26,6 +26,7 @@ class ModeIdentifyTrainer(Trainer):
             num_workers: int,
             pin_memory: bool,
             device: Union[str, torch.device] = "cpu",
+            mixup: bool = False,
             **kwargs
     ):
         super(ModeIdentifyTrainer, self).__init__(model,
@@ -34,6 +35,7 @@ class ModeIdentifyTrainer(Trainer):
                                                   optimizer,
                                                   num_epochs,
                                                   data_collator,
+                                                  mixup,
                                                   saved_dir,
                                                   batch_size=batch_size,
                                                   shuffle=shuffle,
@@ -53,6 +55,31 @@ class ModeIdentifyTrainer(Trainer):
             predict_loss = classification_criterion(pred_logits, true_labels)
             loss = recover_loss * 100 + predict_loss
         return loss
+    
+    def compute_mixup_loss(
+            self, 
+            recover_data, 
+            pred_logits, 
+            true_data,
+            batch_labels_a, 
+            batch_labels_b, 
+            lam
+    ):
+        cls_criterion = nn.CrossEntropyLoss(reduction="mean")
+        if recover_data is None:
+            loss = (
+                lam * cls_criterion(pred_logits, batch_labels_a) + 
+                (1 - lam) * cls_criterion(pred_logits, batch_labels_b)
+            )
+        else:
+            reg_criterion = nn.MSELoss(reduction="mean")
+            recover_loss = reg_criterion(recover_data, true_data)
+            predict_loss = (
+                lam * cls_criterion(pred_logits, batch_labels_a) + 
+                (1 - lam) * cls_criterion(pred_logits, batch_labels_b)
+            )
+            loss = recover_loss * 100 + predict_loss
+        return loss
 
     def forward_once(self, model_kwargs, batch, augment_fn=None):
         batch_data, seq_len, batch_labels = batch
@@ -60,6 +87,8 @@ class ModeIdentifyTrainer(Trainer):
         if augment_fn is not None:
             batch_data, _ = augment_fn(batch_data.squeeze(dim=1), seq_len)
             batch_data = batch_data.unsqueeze(dim=1)
+        if self.mixup:
+            batch_data, batch_labels_a, batch_labels_b, lam = self.mixup_data(batch_data, batch_labels)
         if self.train_dataset.model_name == "SECA":
             max_length = model_kwargs["max_length"]
             hidden_unlabel, pool_indices, hidden_label = self.model.encoding(
@@ -72,8 +101,33 @@ class ModeIdentifyTrainer(Trainer):
             hiddens, _ = self.model.encoding(batch_data)
             pred_logits = self.model.decoding(hiddens)
             recover_data = None
-        loss = self.compute_loss(recover_data, pred_logits, batch_data, batch_labels)
+        if self.mixup:
+            loss = self.compute_mixup_loss(recover_data, pred_logits, batch_data, batch_labels_a, batch_labels_b, lam)
+        else:
+            loss = self.compute_loss(recover_data, pred_logits, batch_data, batch_labels)
         return loss
+    
+    def mixup_train(self, max_length=None):
+        best_F1 = float("-inf")
+        train_loader = self.get_train_dataloader()
+        model_kwargs = dict(max_length=max_length)
+        for epoch in range(self.num_epochs):
+            print("[start {}-th training]".format(epoch + 1))
+            self.model.train()
+            for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
+                self.optimizer.zero_grad()
+                loss = self.forward_once(model_kwargs, batch, augment_fn=None)
+                loss.backward()
+                self.optimizer.step()
+
+            results = self.evaluate()
+            if self.saved_dir is not None:
+                if results[-1] > best_F1:
+                    print("saving best model.")
+                    best_F1 = results[-1]
+                    self.save_model(save_optim=True)
+            if (epoch + 1) % 5 == 0:
+                print("valid f1: {:.4f}".format(results[-1]))
 
     def train(self):
         best_F1 = float("-inf")
