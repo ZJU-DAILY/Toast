@@ -161,10 +161,9 @@ class RecoveryTrainer(Trainer):
             pred_logit, 
             true_node_a, 
             true_rate_a, 
-            true_logit_a,
             true_node_b, 
             true_rate_b, 
-            true_logit_b,
+            true_logit,
             src_len, 
             tgt_len, 
             weights,
@@ -180,9 +179,7 @@ class RecoveryTrainer(Trainer):
         node_loss = lam * node_loss_a + (1 - lam) * node_loss_b
         rate_loss = lam * rate_loss_a + (1 - lam) * rate_loss_b
         if pred_logit is not None:
-            enc_loss_a = -1 * (pred_logit.squeeze(-1) * true_logit_a).sum() / src_len.sum()
-            enc_loss_b = -1 * (pred_logit.squeeze(-1) * true_logit_b).sum() / src_len.sum()
-            enc_loss = lam * enc_loss_a + (1 - lam) * enc_loss_b
+            enc_loss = -1 * (pred_logit.squeeze(-1) * true_logit).sum() / src_len.sum()
             return node_loss + rate_loss * weights[0] + enc_loss * weights[1]
         else:
             return node_loss + rate_loss * weights[0]
@@ -222,12 +219,12 @@ class RecoveryTrainer(Trainer):
                 sequences, src_seq_len = augment_fn(sequences, src_seq_len)
             if self.mixup:
                 mixed_data, target_a, target_b, lam = self.mixup_data(
-                    (sequences, hiddens, logits),
-                    (tgt_node_seq, tgt_rate_seq, batched_graph.gt)
+                    (sequences, hiddens),
+                    (tgt_node_seq, tgt_rate_seq)
                 )
-                sequences, hiddens, logits = mixed_data
-                tgt_node_seq_a, tgt_rate_seq_a, gt_a = target_a
-                tgt_node_seq_b, tgt_rate_seq_b, gt_b = target_b
+                sequences, hiddens = mixed_data
+                tgt_node_seq_a, tgt_rate_seq_a = target_a
+                tgt_node_seq_b, tgt_rate_seq_b = target_b
             pred_node, pred_rate = self.model.decoding(
                 sequences, hiddens, road_embed, road_feats, src_seq_len,
                 tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio
@@ -245,7 +242,6 @@ class RecoveryTrainer(Trainer):
                 sequences, hiddens = mixed_data
                 tgt_node_seq_a, tgt_rate_seq_a = target_a
                 tgt_node_seq_b, tgt_rate_seq_b = target_b
-                gt_a, gt_b = None, None
             pred_node, pred_rate = self.model.decoding(
                 sequences, hiddens, road_feats,
                 src_seq_len, tgt_node_seq, tgt_rate_seq, tgt_seq_len, tgt_inf_scores, tf_ratio
@@ -266,8 +262,8 @@ class RecoveryTrainer(Trainer):
             true_rate_b = true_rate_b.permute(1, 0)
             loss = self.compute_mixup_loss(
                 pred_node, pred_rate, logits,
-                true_node_a, true_rate_a, gt_a,
-                true_node_b, true_rate_b, gt_b,
+                true_node_a, true_rate_a,
+                true_node_b, true_rate_b, gt,
                 src_seq_len, tgt_seq_len, weights, lam
             )
         else:
@@ -294,17 +290,30 @@ class RecoveryTrainer(Trainer):
         road_feat = road_feat.to(self.device)
         best_loss = float("inf")
         train_loader = self.get_train_dataloader()
+        if self.train_dataset.model_name == "RNTrajRec":
+            model_kwargs = dict(
+                road_net=road_net,
+                road_grid=road_grid,
+                road_len=road_len,
+                road_nodes=road_nodes.to(self.device),
+                road_edge=road_edge.long().to(self.device),
+                road_batch=road_batch.to(self.device),
+                road_feat=road_feat.to(self.device),
+                tf_ratio=0.,
+                weights=weights
+            )
+        else:
+            model_kwargs = dict(
+                road_net=road_net,
+                road_feat=road_feat.to(self.device),
+                tf_ratio=0.,
+                weights=weights
+            )
         for epoch in range(self.num_epochs):
             print("[start {}-th training]".format(epoch + 1))
             self.model.train()
             for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
                 self.optimizer.zero_grad()
-                model_kwargs = {}
-                model_kwargs["road_feat"], model_kwargs["tf_ratio"], model_kwargs["weights"] = road_feat, tf_ratio, weights
-                if self.train_dataset.model_name == "RNTrajRec":
-                    model_kwargs["road_len"] = road_len
-                    model_kwargs["road_grid"], model_kwargs["road_nodes"] = road_grid, road_nodes
-                    model_kwargs["road_edge"], model_kwargs["road_batch"] = road_edge, road_batch
                 loss = self.forward_once(model_kwargs, batch, augment_fn=None)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)

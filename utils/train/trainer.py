@@ -90,10 +90,11 @@ class Trainer:
         else:
             batch_size = x.shape[0]
             mixed_x, y_a, y_b = None, None, None
-        index = torch.randperm(batch_size).to(x.device)
+        index = torch.randperm(batch_size).to(self.device)
         if isinstance(x, tuple):
             for i in range(len(x)):
                 mixed_x += (lam * x[i] + (1 - lam) * x[i][index],)
+            for i in range(len(y)):
                 y_a += (y[i],)
                 y_b += (y[i][index],)
         else:
