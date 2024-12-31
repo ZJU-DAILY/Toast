@@ -83,22 +83,23 @@ class Trainer:
             lam = torch.distributions.Beta(alpha, alpha).sample().item()
         else:
             lam = 1.0
-
-        if isinstance(x, tuple):
-            batch_size = x[0].shape[0]
-            mixed_x, y_a, y_b = (), (), ()
-        else:
-            batch_size = x.shape[0]
-            mixed_x, y_a, y_b = None, None, None
+        
+        batch_size = x[0].shape[0] if isinstance(x, tuple) else x.shape[0]
         index = torch.randperm(batch_size).to(self.device)
+        
         if isinstance(x, tuple):
+            mixed_x = ()
             for i in range(len(x)):
                 mixed_x += (lam * x[i] + (1 - lam) * x[i][index],)
+        else:
+            mixed_x = lam * x + (1 - lam) * x[index]
+
+        if isinstance(y, tuple):
+            y_a, y_b = (), ()
             for i in range(len(y)):
                 y_a += (y[i],)
                 y_b += (y[i][index],)
         else:
-            mixed_x = lam * x + (1 - lam) * x[index]
             y_a, y_b = y, y[index]
         return mixed_x, y_a, y_b, lam
 

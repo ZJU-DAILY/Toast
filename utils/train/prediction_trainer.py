@@ -69,6 +69,7 @@ class PredictTrainer(Trainer):
             if self.mixup:
                 flow, labels_a, labels_b, lam = self.mixup_data(flow, labels)
                 labels_a, labels_b = labels_a.permute(2, 0, 1, 3), labels_b.permute(2, 0, 1, 3)
+                labels_a, labels_b = labels_a[..., :self.model.output_dim], labels_b[..., :self.model.output_dim]
             predicts, labels = self.model(flow, features, labels, model_kwargs["edge_index"], train_mode=True)
             if self.mixup:
                 loss = self.compute_mixup_loss(predicts, labels_a, labels_b, lam)
@@ -84,7 +85,7 @@ class PredictTrainer(Trainer):
                 labels.to(self.device)
             )
             if self.mixup:
-                data, labels_a, labels_b = self.mixup_data(
+                data, labels_a, labels_b, lam = self.mixup_data(
                     (close_data, period_data, trend_data),
                     (labels, )
                 )
@@ -110,16 +111,16 @@ class PredictTrainer(Trainer):
         for epoch in range(self.num_epochs):
             print("[start {}-th training]".format(epoch + 1))
             self.model.train()
-            for batch in tqdm.tqdm(train_loader, total=len(self.train_loader), desc="train"):
+            for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="train"):
                 self.optimizer.zero_grad()
                 loss = self.forward_once(model_kwargs, batch)
                 loss.backward()
                 self.optimizer.step()
             results = self.evaluate(edge_index=edge_index, scaler=scaler)
             if self.saved_dir is not None:
-                if results[0] < self.min_rmse:
+                if results[0] < min_rmse:
                     print("saving best model.")
-                    self.min_rmse = results[0]
+                    min_rmse = results[0]
                     self.save_model(save_optim=True)
             if (epoch + 1) % 5 == 0:
                 print("valid rmse: {:.4f}".format(results[-1]))
