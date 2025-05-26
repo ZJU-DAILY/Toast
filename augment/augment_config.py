@@ -59,14 +59,3 @@ class TrajUnionConfig:
         self.beta1 = beta1
         self.beta2 = beta2
         self.eps = eps
-
-
-class AttrJoinConfig:
-    def __init__(
-            self,
-            task_type: Optional[TaskType],
-            model_name: str
-    ):
-        self.task_type = task_type
-        self.model_name = model_name
-        pass
