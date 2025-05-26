@@ -6,8 +6,6 @@ from trak.projectors import ProjectionType
 class TaskType(str, enum.Enum):
     TRAJ_RECOVERY = "trajectory_recovery"
     TRAJ_SIMILAR = "trajectory_similarity"
-    TYPE_IDENTIFY = "transport_type_identification"
-    FLOW_PREDICT = "traffic_flow_prediction"
 
 
 class PointUnionConfig:
